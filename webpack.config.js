@@ -3,28 +3,24 @@ var HtmlWebpackPlugin = require('html-webpack-plugin')
 var webpack = require('webpack')
 
 module.exports = {
+    mode: 'development',
+    devtool: false,
     entry: {
-        opensheetmusicdisplay: './src/index.ts', // Main index (OpenSheetMusicDisplay and other classes)
         demo: './demo/index.js' // Demo index
     },
     output: {
         path: path.resolve(__dirname, 'build'),
         filename: '[name].js',
-        library: 'opensheetmusicdisplay',
-        libraryTarget: 'umd',
         globalObject: 'this'
     },
     resolve: {
-        // Add '.ts' and '.tsx' as a resolvable extension.
         extensions: ['.ts', '.tsx', '.js']
     },
     module: {
         rules: [
-            // all files with a '.ts' or '.tsx' extension will be handled by 'ts-loader'
             {
                 test: /\.ts$/,
                 loader: 'ts-loader',
-                // loader: 'awesome-typescript-loader',
                 exclude: /(node_modules|bower_components)/
             },
             {

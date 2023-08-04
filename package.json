@@ -5,6 +5,8 @@
   "main": "build/opensheetmusicdisplay.min.js",
   "types": "build/dist/src/index.d.ts",
   "scripts": {
+    "dev": "webpack-dev-server --progress --config webpack.config.js",
+    "prod": "webpack --progress --config webpack.config.js && cp -r test/data/self/ build/self",
     "docs": "typedoc --out ./build/docs --name OpenSheetMusicDisplay ./src",
     "eslint": "eslint -c .eslintrc.js --ext .ts .",
     "lint": "npm run eslint",
@@ -81,7 +83,6 @@
     "@types/node": "^16.11.11",
     "@typescript-eslint/eslint-plugin": "^5.5.0",
     "@typescript-eslint/parser": "^5.5.0",
-    "canvas": "^2.8.0",
     "chai": "^4.3.4",
     "clean-webpack-plugin": "^4.0.0",
     "cross-blob": "^3.0.0",
