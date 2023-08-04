@@ -145,7 +145,7 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
     var showHeader = true;
     var showDebugControls = false;
 
-    document.title = "OpenSheetMusicDisplay Demo";
+    document.title = "piano score for cwj";
 
     // Initialization code
     function init() {
@@ -438,17 +438,17 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         //     }
         // }
 
-        if (debugReRenderBtn) {
-            debugReRenderBtn.onclick = function () {
-                rerender();
-            }
-        }
+        // if (debugReRenderBtn) {
+        //     debugReRenderBtn.onclick = function () {
+        //         rerender();
+        //     }
+        // }
 
-        if (debugClearBtn) {
-            debugClearBtn.onclick = function () {
-                openSheetMusicDisplay.clear();
-            }
-        }
+        // if (debugClearBtn) {
+        //     debugClearBtn.onclick = function () {
+        //         openSheetMusicDisplay.clear();
+        //     }
+        // }
 
         // Create OSMD object and canvas
         openSheetMusicDisplay = new OpenSheetMusicDisplay(canvas, {
@@ -518,17 +518,20 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         nextCursorBtn.addEventListener("click", function () {
             openSheetMusicDisplay.cursor.next();
         });
-        resetCursorBtn.addEventListener("click", function () {
-            openSheetMusicDisplay.cursor.reset();
-        });
+        // resetCursorBtn.addEventListener("click", function () {
+        //     openSheetMusicDisplay.cursor.reset();
+        // });
         if (followCursorCheckbox) {
             followCursorCheckbox.onclick = function () {
                 openSheetMusicDisplay.FollowCursor = !openSheetMusicDisplay.FollowCursor;
             }
         }
+        hideCursorBtn.style.display = 'none'
         hideCursorBtn.addEventListener("click", function () {
             if (openSheetMusicDisplay.cursor) {
                 openSheetMusicDisplay.cursor.hide();
+                hideCursorBtn.style.display = 'none'
+                showCursorBtn.style.display = 'block'
             } else {
                 console.info("Can't hide cursor, as it was disabled (e.g. by drawingParameters).");
             }
@@ -536,6 +539,8 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         showCursorBtn.addEventListener("click", function () {
             if (openSheetMusicDisplay.cursor) {
                 openSheetMusicDisplay.cursor.show();
+                hideCursorBtn.style.display = 'block'
+                showCursorBtn.style.display = 'none'
             } else {
                 console.info("Can't show cursor, as it was disabled (e.g. by drawingParameters).");
             }
