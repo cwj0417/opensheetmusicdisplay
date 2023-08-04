@@ -12,7 +12,7 @@ jobs:
           with:
             node-version: "16.14.0"
         - run: yarn
-        - run: yarn build
+        - run: yarn prod
         - uses: JamesIves/github-pages-deploy-action@4.1.7
           with:
             branch: page
