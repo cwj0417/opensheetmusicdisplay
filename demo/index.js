@@ -1,7 +1,7 @@
 import { OpenSheetMusicDisplay } from '../src/OpenSheetMusicDisplay/OpenSheetMusicDisplay';
-import { BackendType } from '../src/OpenSheetMusicDisplay/OSMDOptions';
-import * as jsPDF  from '../node_modules/jspdf/dist/jspdf.es.min';
-import * as svg2pdf from '../node_modules/svg2pdf.js/dist/svg2pdf.umd.min';
+// import { BackendType } from '../src/OpenSheetMusicDisplay/OSMDOptions';
+// import * as jsPDF  from '../node_modules/jspdf/dist/jspdf.es.min';
+// import * as svg2pdf from '../node_modules/svg2pdf.js/dist/svg2pdf.umd.min';
 import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculator';
 
 /*jslint browser:true */
@@ -380,27 +380,27 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         if (selectSample) {
             selectSample.onchange = selectSampleOnChange;
         }
-        if (selectBounding) {
-            selectBounding.onchange = selectBoundingOnChange;
-        }
+        // if (selectBounding) {
+        //     selectBounding.onchange = selectBoundingOnChange;
+        // }
 
-        for (const selectPageSize of selectPageSizes) {
-            if (selectPageSize) {
-                selectPageSize.onchange = function (evt) {
-                    var value = evt.target.value;
-                    openSheetMusicDisplay.setPageFormat(value);
-                    openSheetMusicDisplay.render();
-                };
-            }
-        }
+        // for (const selectPageSize of selectPageSizes) {
+        //     if (selectPageSize) {
+        //         selectPageSize.onchange = function (evt) {
+        //             var value = evt.target.value;
+        //             openSheetMusicDisplay.setPageFormat(value);
+        //             openSheetMusicDisplay.render();
+        //         };
+        //     }
+        // }
 
-        for (const printPdfBtn of printPdfBtns) {
-            if (printPdfBtn) {
-                printPdfBtn.onclick = function () {
-                    createPdf();
-                }
-            }
-        }
+        // for (const printPdfBtn of printPdfBtns) {
+        //     if (printPdfBtn) {
+        //         printPdfBtn.onclick = function () {
+        //             createPdf();
+        //         }
+        //     }
+        // }
 
         // Pre-select default music piece
 
@@ -424,19 +424,19 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
             }
         }
 
-        if (skylineDebug) {
-            skylineDebug.onclick = function () {
-                openSheetMusicDisplay.DrawSkyLine = !openSheetMusicDisplay.DrawSkyLine;
-                openSheetMusicDisplay.render();
-            }
-        }
+        // if (skylineDebug) {
+        //     skylineDebug.onclick = function () {
+        //         openSheetMusicDisplay.DrawSkyLine = !openSheetMusicDisplay.DrawSkyLine;
+        //         openSheetMusicDisplay.render();
+        //     }
+        // }
 
-        if (bottomlineDebug) {
-            bottomlineDebug.onclick = function () {
-                openSheetMusicDisplay.DrawBottomLine = !openSheetMusicDisplay.DrawBottomLine;
-                openSheetMusicDisplay.render();
-            }
-        }
+        // if (bottomlineDebug) {
+        //     bottomlineDebug.onclick = function () {
+        //         openSheetMusicDisplay.DrawBottomLine = !openSheetMusicDisplay.DrawBottomLine;
+        //         openSheetMusicDisplay.render();
+        //     }
+        // }
 
         if (debugReRenderBtn) {
             debugReRenderBtn.onclick = function () {
@@ -541,23 +541,23 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
             }
         });
 
-        backendSelect.addEventListener("change", function (e) {
-            var value = e.target.value;
-            var createNewOsmd = true;
+        // backendSelect.addEventListener("change", function (e) {
+        //     var value = e.target.value;
+        //     var createNewOsmd = true;
 
-            if (createNewOsmd) {
-                // clears the canvas element
-                canvas.innerHTML = "";
-                //openSheetMusicDisplay = new OpenSheetMusicDisplay(canvas, { backend: value }); // resets EngravingRules
-                openSheetMusicDisplay.setOptions({backend: value});
-                openSheetMusicDisplay.setLogLevel('info'); // set this to 'debug' if you want to get more detailed control flow information
-            } else {
-                // alternative, doesn't work yet, see setOptions():
-                openSheetMusicDisplay.setOptions({ backend: value });
-            }
-            console.log("[OSMD] selectSampleOnChange addEventListener change");
-            // selectSampleOnChange();
-        });
+        //     if (createNewOsmd) {
+        //         // clears the canvas element
+        //         canvas.innerHTML = "";
+        //         //openSheetMusicDisplay = new OpenSheetMusicDisplay(canvas, { backend: value }); // resets EngravingRules
+        //         openSheetMusicDisplay.setOptions({backend: value});
+        //         openSheetMusicDisplay.setLogLevel('info'); // set this to 'debug' if you want to get more detailed control flow information
+        //     } else {
+        //         // alternative, doesn't work yet, see setOptions():
+        //         openSheetMusicDisplay.setOptions({ backend: value });
+        //     }
+        //     console.log("[OSMD] selectSampleOnChange addEventListener change");
+        //     // selectSampleOnChange();
+        // });
         if(transposeBtn && transpose){
             transposeBtn.onclick = function(){
                 var transposeValue = parseInt(transpose.value);
@@ -627,10 +627,10 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         return result;
     }
 
-    function selectBoundingOnChange(evt) {
-        var value = evt.target.value;
-        openSheetMusicDisplay.DrawBoundingBox = value;
-    }
+    // function selectBoundingOnChange(evt) {
+    //     var value = evt.target.value;
+    //     openSheetMusicDisplay.DrawBoundingBox = value;
+    // }
 
     function selectSampleOnChange(str) {
         error();
@@ -856,63 +856,63 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
      * Creates a Pdf of the currently rendered MusicXML
      * @param pdfName if no name is given, the composer and title of the piece will be used
      */
-    async function createPdf(pdfName) {
-        if (openSheetMusicDisplay.backendType !== BackendType.SVG) {
-            console.log("[OSMD] createPdf(): Warning: createPDF is only supported for SVG background for now, not for Canvas." +
-                " Please use osmd.setOptions({backendType: SVG}).");
-            return;
-        }
+    // async function createPdf(pdfName) {
+    //     if (openSheetMusicDisplay.backendType !== BackendType.SVG) {
+    //         console.log("[OSMD] createPdf(): Warning: createPDF is only supported for SVG background for now, not for Canvas." +
+    //             " Please use osmd.setOptions({backendType: SVG}).");
+    //         return;
+    //     }
 
-        if (pdfName === undefined) {
-            pdfName = openSheetMusicDisplay.sheet.FullNameString + ".pdf";
-        }
+    //     if (pdfName === undefined) {
+    //         pdfName = openSheetMusicDisplay.sheet.FullNameString + ".pdf";
+    //     }
 
-        const backends = openSheetMusicDisplay.drawer.Backends;
-        let svgElement = backends[0].getSvgElement();
+    //     const backends = openSheetMusicDisplay.drawer.Backends;
+    //     let svgElement = backends[0].getSvgElement();
 
-        let pageWidth = 210;
-        let pageHeight = 297;
-        const engravingRulesPageFormat = openSheetMusicDisplay.rules.PageFormat;
-        if (engravingRulesPageFormat && !engravingRulesPageFormat.IsUndefined) {
-            pageWidth = engravingRulesPageFormat.width;
-            pageHeight = engravingRulesPageFormat.height;
-        } else {
-            pageHeight = pageWidth * svgElement.clientHeight / svgElement.clientWidth;
-        }
+    //     let pageWidth = 210;
+    //     let pageHeight = 297;
+    //     const engravingRulesPageFormat = openSheetMusicDisplay.rules.PageFormat;
+    //     if (engravingRulesPageFormat && !engravingRulesPageFormat.IsUndefined) {
+    //         pageWidth = engravingRulesPageFormat.width;
+    //         pageHeight = engravingRulesPageFormat.height;
+    //     } else {
+    //         pageHeight = pageWidth * svgElement.clientHeight / svgElement.clientWidth;
+    //     }
 
-        const orientation = pageHeight > pageWidth ? "p" : "l";
-        // create a new jsPDF instance
-        const pdf = new jsPDF.jsPDF({
-            orientation: orientation,
-            unit: "mm",
-            format: [pageWidth, pageHeight]
-        });
-        //const scale = pageWidth / svgElement.clientWidth;
-        for (let idx = 0, len = backends.length; idx < len; ++idx) {
-            if (idx > 0) {
-                pdf.addPage();
-            }
-            svgElement = backends[idx].getSvgElement();
+    //     const orientation = pageHeight > pageWidth ? "p" : "l";
+    //     // create a new jsPDF instance
+    //     const pdf = new jsPDF.jsPDF({
+    //         orientation: orientation,
+    //         unit: "mm",
+    //         format: [pageWidth, pageHeight]
+    //     });
+    //     //const scale = pageWidth / svgElement.clientWidth;
+    //     for (let idx = 0, len = backends.length; idx < len; ++idx) {
+    //         if (idx > 0) {
+    //             pdf.addPage();
+    //         }
+    //         svgElement = backends[idx].getSvgElement();
             
-            if (!pdf.svg && !svg2pdf) { // this line also serves to make the svg2pdf not unused, though it's still necessary
-                // we need svg2pdf to have pdf.svg defined
-                console.log("svg2pdf missing, necessary for jspdf.svg().");
-                return;
-            }
-            await pdf.svg(svgElement, {
-                x: 0,
-                y: 0,
-                width: pageWidth,
-                height: pageHeight,
-            })
-        }
+    //         if (!pdf.svg && !svg2pdf) { // this line also serves to make the svg2pdf not unused, though it's still necessary
+    //             // we need svg2pdf to have pdf.svg defined
+    //             console.log("svg2pdf missing, necessary for jspdf.svg().");
+    //             return;
+    //         }
+    //         await pdf.svg(svgElement, {
+    //             x: 0,
+    //             y: 0,
+    //             width: pageWidth,
+    //             height: pageHeight,
+    //         })
+    //     }
 
-        pdf.save(pdfName); // save/download the created pdf
-        //pdf.output("pdfobjectnewwindow", {filename: "osmd_createPDF.pdf"}); // open PDF in new tab/window
+    //     pdf.save(pdfName); // save/download the created pdf
+    //     //pdf.output("pdfobjectnewwindow", {filename: "osmd_createPDF.pdf"}); // open PDF in new tab/window
 
-        // note that using jspdf with svg2pdf creates unnecessary console warnings "AcroForm-Classes are not populated into global-namespace..."
-        // this will hopefully be fixed with a new jspdf release, see https://github.com/yWorks/jsPDF/pull/32
-    }
+    //     // note that using jspdf with svg2pdf creates unnecessary console warnings "AcroForm-Classes are not populated into global-namespace..."
+    //     // this will hopefully be fixed with a new jspdf release, see https://github.com/yWorks/jsPDF/pull/32
+    // }
 
     // Register events: load, drag&drop
     window.addEventListener("load", function () {
