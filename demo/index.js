@@ -119,7 +119,7 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         printPdfBtns,
         transpose,
         transposeBtn;
-    
+
     // manage option setting and resetting for specific samples, e.g. in the autobeam sample autobeam is set to true, otherwise reset to previous state
     // TODO design a more elegant option state saving & restoring system, though that requires saving the options state in OSMD
     var minMeasureToDrawStashed = 1;
@@ -145,7 +145,7 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
     var showHeader = true;
     var showDebugControls = false;
 
-    document.title = "piano score for cwj";
+    document.title = "cwj's piano score";
 
     // Initialization code
     function init() {
@@ -194,7 +194,7 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
                 document.body.style.overflow = paramOverflow;
             }
         }
-        
+
         var compactMode = paramCompactMode && paramCompactMode !== '0';
         var measureRangeStart = paramMeasureRangeStart ? Number.parseInt(paramMeasureRangeStart) : 0;
         var measureRangeEnd = paramMeasureRangeEnd ? Number.parseInt(paramMeasureRangeEnd) : Number.MAX_SAFE_INTEGER;
@@ -212,7 +212,7 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
 
         var horizontalScrolling = paramHorizontalScrolling === '1';
         var singleHorizontalStaffline = paramSingleHorizontalStaffline === '1';
-        
+
         // set the backendSelect debug controls dropdown menu selected item
         //console.log("true: " + backendSelect && backendType.toLowerCase && backendType.toLowerCase() === "canvas");
         // TODO somehow backendSelect becomes undefined here:
@@ -277,7 +277,7 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
             var elementsToEnable = [
                 selectSample, selectBounding, selectPageSizes[0], backendSelect, backendSelectDiv, divControls
             ];
-            for (var i=0; i<elementsToEnable.length; i++) {
+            for (var i = 0; i < elementsToEnable.length; i++) {
                 if (elementsToEnable[i]) { // make sure this element is not null/exists in the index.html, e.g. github.io demo has different index.html
                     if (elementsToEnable[i].style) {
                         elementsToEnable[i].style.visibility = defaultVisibilityValue;
@@ -467,8 +467,8 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
             // fingeringInsideStafflines: "true", // default: false. true draws fingerings directly above/below notes
             setWantedStemDirectionByXml: true, // try false, which was previously the default behavior
             // drawUpToMeasureNumber: 3, // draws only up to measure 3, meaning it draws measure 1 to 3 of the piece.
-            drawFromMeasureNumber : measureRangeStart,
-            drawUpToMeasureNumber : measureRangeEnd,
+            drawFromMeasureNumber: measureRangeStart,
+            drawUpToMeasureNumber: measureRangeEnd,
 
             //drawMeasureNumbers: false, // disable drawing measure numbers
             //measureNumberInterval: 4, // draw measure numbers only every 4 bars (and at the beginning of a new system)
@@ -563,8 +563,8 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         //     console.log("[OSMD] selectSampleOnChange addEventListener change");
         //     // selectSampleOnChange();
         // });
-        if(transposeBtn && transpose){
-            transposeBtn.onclick = function(){
+        if (transposeBtn && transpose) {
+            transposeBtn.onclick = function () {
                 var transposeValue = parseInt(transpose.value);
                 openSheetMusicDisplay.Sheet.Transpose = transposeValue;
                 openSheetMusicDisplay.updateGraphic();
@@ -599,7 +599,7 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         // test parameter: ?openUrl=https://opensheetmusiceducation.org/index.php?gf-download=2020%2F01%2FJohannSebastianBach_PraeludiumInCDur_BWV846_1.xml&endUrl&form-id=1&field-id=4&hash=c4ba271ef08204a26cbd4cd2d751c53b78f238c25ddbb1f343e1172f2ce2aa53
         //   (enable the console.log at the end of this method for testing)
         // working test parameter in local demo: ?openUrl=OSMD_function_test_all.xml&endUrl
-    
+
         if (parameterName === 'openUrl') {
             let startParameterName = 'openUrl=';
             let endParameterName = '&endUrl';
@@ -898,7 +898,7 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
     //             pdf.addPage();
     //         }
     //         svgElement = backends[idx].getSvgElement();
-            
+
     //         if (!pdf.svg && !svg2pdf) { // this line also serves to make the svg2pdf not unused, though it's still necessary
     //             // we need svg2pdf to have pdf.svg defined
     //             console.log("svg2pdf missing, necessary for jspdf.svg().");
