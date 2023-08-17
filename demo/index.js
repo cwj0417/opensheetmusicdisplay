@@ -1,12 +1,12 @@
 import { OpenSheetMusicDisplay } from '../src/OpenSheetMusicDisplay/OpenSheetMusicDisplay';
-// import { BackendType } from '../src/OpenSheetMusicDisplay/OSMDOptions';
-// import * as jsPDF  from '../node_modules/jspdf/dist/jspdf.es.min';
-// import * as svg2pdf from '../node_modules/svg2pdf.js/dist/svg2pdf.umd.min';
 import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculator';
 
 /*jslint browser:true */
 (function () {
     "use strict";
+    let isShowTime = false
+    let isTiming = false
+    let time = 0
     var openSheetMusicDisplay;
     var sampleFolder = "self/",
         samples = {
@@ -27,66 +27,6 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
             'Sonate No. 8, “Pathétique” 3rd Movement': 'Sonate_No._8_Pathetique_3rd_Movement.mxl',
             'Chopin - Nocturne Op 9 No 2(E Flat Major)': 'Chopin_-_Nocturne_Op_9_No_2_E_Flat_Major.mxl',
             'Chopin - Nocturne Op. 9 No. 1': 'Chopin_-_Nocturne_Op._9_No._1.mxl',
-            // "Beethoven, L.v. - An die ferne Geliebte": "Beethoven_AnDieFerneGeliebte.xml",
-            // "Clementi, M. - Sonatina Op.36 No.1 Pt.1": "MuzioClementi_SonatinaOpus36No1_Part1.xml",
-            // "Clementi, M. - Sonatina Op.36 No.1 Pt.2": "MuzioClementi_SonatinaOpus36No1_Part2.xml",
-            // "Clementi, M. - Sonatina Op.36 No.3 Pt.1": "MuzioClementi_SonatinaOpus36No3_Part1.xml",
-            // "Clementi, M. - Sonatina Op.36 No.3 Pt.2": "MuzioClementi_SonatinaOpus36No3_Part2.xml",
-            // "Bach, J.S. - Praeludium in C-Dur BWV846 1": "JohannSebastianBach_PraeludiumInCDur_BWV846_1.xml",
-            // "Bach, J.S. - Air": "JohannSebastianBach_Air.xml",
-            // "Gounod, C. - Méditation": "CharlesGounod_Meditation.xml",
-            // "Haydn, J. - Concertante Cello": "JosephHaydn_ConcertanteCello.xml",
-            // "Joplin, S. - Elite Syncopations": "ScottJoplin_EliteSyncopations.xml",
-            // "Joplin, S. - The Entertainer": "ScottJoplin_The_Entertainer.xml",
-            // "Mozart, W.A. - An Chloe": "Mozart_AnChloe.xml",
-            // "Mozart, W.A. - Das Veilchen": "Mozart_DasVeilchen.xml",
-            // "Mozart, W.A. - Clarinet Quintet (Excerpt)": "Mozart_Clarinet_Quintet_Excerpt.mxl",
-            // "Mozart, W.A. - String Quartet in G, K. 387, 1st Mvmt Excerpt": "Mozart_String_Quartet_in_G_K._387_1st_Mvmnt_excerpt.musicxml",
-            // "Mozart/Holzer - Land der Berge (national anthem of Austria)": "Land_der_Berge.musicxml",
-            // "OSMD Function Test - All": "OSMD_function_test_all.xml",
-            // "OSMD Function Test - Accidentals": "OSMD_function_test_accidentals.musicxml",
-            // "OSMD Function Test - Autobeam": "OSMD_function_test_autobeam.musicxml",
-            // "OSMD Function Test - Auto-/Custom-Coloring": "OSMD_function_test_auto-custom-coloring-entchen.musicxml",
-            // "OSMD Function Test - Bar lines": "OSMD_function_test_bar_lines.musicxml",
-            // "OSMD Function Test - Chord Symbols": "OSMD_function_test_chord_symbols.musicxml",
-            // "OSMD Function Test - Chord Spacing": "OSMD_function_test_chord_spacing.mxl",
-            // "OSMD Function Test - Chord Symbols - Various Chords": "OSMD_function_test_chord_tests_various.musicxml",
-            // "OSMD Function Test - Chord Symbols - BrookeWestSample": "BrookeWestSample.mxl",
-            // "OSMD Function Test - Color (from XML)": "OSMD_function_test_color.musicxml",
-            // "OSMD Function Test - Container height (compacttight mode)": "OSMD_Function_Test_Container_height.musicxml",
-            // "OSMD Function Test - Drumset": "OSMD_function_test_drumset.musicxml",
-            // "OSMD Function Test - Drums on one Line": "OSMD_Function_Test_Drums_one_line_snare_plus_piano.musicxml", 
-            // "OSMD Function Test - Expressions": "OSMD_function_test_expressions.musicxml",
-            // "OSMD Function Test - Expressions Overlap": "OSMD_function_test_expressions_overlap.musicxml",
-            // "OSMD Function Test - Grace Notes": "OSMD_function_test_GraceNotes.xml",
-            // "OSMD Function Test - Metronome Marks": "OSMD_function_test_metronome_marks.mxl",
-            // "OSMD Function Test - Multiple Rest Measures": "OSMD_function_test_multiple_rest_measures.musicxml",
-            // "OSMD Function Test - Invisible Notes": "OSMD_function_test_invisible_notes.musicxml",
-            // "OSMD Function Test - Notehead Shapes": "OSMD_function_test_noteheadShapes.musicxml",
-            // "OSMD Function Test - Ornaments": "OSMD_function_test_Ornaments.xml",
-            // "OSMD Function Test - Pedals": "OSMD_Function_Test_Pedals.musicxml",
-            // "OSMD Function Test - Selecting Measures To Draw": "OSMD_function_test_measuresToDraw_Beethoven_AnDieFerneGeliebte.xml",
-            // "OSMD Function Test - System and Page Breaks": "OSMD_Function_Test_System_and_Page_Breaks_4_pages.mxl",
-            // "OSMD Function Test - Tabulature": "OSMD_Function_Test_Tabulature_hayden_study_1.mxl",
-            // "OSMD Function Test - Tabulature MultiBends": "OSMD_Function_Test_Tablature_Multibends.musicxml",
-            // "OSMD Function Test - Tabulature All Effects": "OSMD_Function_Test_Tablature_Alleffects.musicxml",
-            // "OSMD Function Test - Tremolo": "OSMD_Function_Test_Tremolo_2bars.musicxml",
-            // "OSMD Function Test - Labels": "OSMD_Function_Test_Labels.musicxml",
-            // "OSMD Function Test - High Slur Test": "test_slurs_highNotes.musicxml",
-            // "OSMD Function Test - Auto Multirest Measures Single Staff": "Test_Auto_Multirest_1.musicxml",
-            // "OSMD Function Test - Auto Multirest Measures Multiple Staves": "Test_Auto_Multirest_2.musicxml",
-            // "OSMD Function Test - String number collisions": "test_string_number_collisions.musicxml",
-            // "OSMD Function Test - Repeat Stave Connectors": "OSMD_function_Test_Repeat.musicxml",
-            // "OSMD Function Test - Voice Alignment": "OSMD_Function_Test_Voice_Alignment.musicxml",
-            // "Schubert, F. - An Die Musik": "Schubert_An_die_Musik.xml",
-            // "Actor, L. - Prelude (Large Sample, loading time)": "ActorPreludeSample.xml",
-            // "Actor, L. - Prelude (Large, No Print Part Names)": "ActorPreludeSample_PartName.xml",
-            // "Anonymous - Saltarello": "Saltarello.mxl",
-            // "Debussy, C. - Mandoline": "Debussy_Mandoline.xml",
-            // "Levasseur, F. - Parlez Mois": "Parlez-moi.mxl",
-            // "Schumann, R. - Dichterliebe": "Dichterliebe01.xml",
-            // "Telemann, G.P. - Sonate-Nr.1.1-Dolce": "TelemannWV40.102_Sonate-Nr.1.1-Dolce.xml",
-            // "Telemann, G.P. - Sonate-Nr.1.2-Allegro": "TelemannWV40.102_Sonate-Nr.1.2-Allegro-F-Dur.xml",
         },
 
         zoom = 1.0,
@@ -213,19 +153,6 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         var horizontalScrolling = paramHorizontalScrolling === '1';
         var singleHorizontalStaffline = paramSingleHorizontalStaffline === '1';
 
-        // set the backendSelect debug controls dropdown menu selected item
-        //console.log("true: " + backendSelect && backendType.toLowerCase && backendType.toLowerCase() === "canvas");
-        // TODO somehow backendSelect becomes undefined here:
-        /*if (backendSelect && backendType.toLowerCase && backendType.toLowerCase() === "canvas") {
-            console.log("here1");
-            for (var i=0; i<backendSelect.options.length; i++) {
-                if (backendSelect.options[i].value.toLowerCase() === "canvas") {
-                    backendSelect.selectedIndex = i;
-                }
-            }
-            backendSelect.value = "Canvas";
-        }*/
-
         divControls = document.getElementById('divControls');
         zoomControls = document.getElementById('zoomControls');
         header = document.getElementById('header');
@@ -291,16 +218,6 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
             }
         }
 
-        const optionalControls = document.getElementById('optionalControls');
-        if (optionalControls) {
-            if (showControls) {
-                optionalControls.style.visibility = defaultVisibilityValue;
-                optionalControls.style.opacity = 0.8;
-            } else {
-                optionalControls.style.display = 'none';
-            }
-        }
-
         if (!showHeader) {
             if (header) {
                 header.style.display = 'none';
@@ -313,65 +230,15 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         // Hide error
         error();
 
-        if (showControls) {
-            const optionalControls = document.getElementById('optionalControls');
-            if (optionalControls) {
-                optionalControls.style.opacity = 1.0;
-                // optionalControls.appendChild(zoomControlsButtons);
-                // optionalControls.appendChild(zoomControlsString);
-                optionalControls.style.position = 'absolute';
-                optionalControls.style.zIndex = '10';
-                optionalControls.style.right = '10px';
-                // optionalControls.style.padding = '10px';
-            }
-
-            if (showZoomControl) {
-                const zoomControlsButtonsColumn = document.getElementById('zoomControlsButtons-optional-column');
-                zoomControlsButtonsColumn.style.opacity = 1.0;
-                // const zoomControlsButtons = document.getElementById('zoomControlsButtons-optional');
-                // zoomControlsButtons.style.opacity = 1.0;
-                const zoomControlsString = document.getElementById('zoom-str-optional'); // actually === zoomDivs[1] above
-
-                if (zoomControlsString) {
-                    zoomControlsString.innerHTML = Math.floor(zoom * 100.0) + "%";
-                    zoomControlsString.style.display = 'inline';
-                    // zoomControlsString.style.padding = '10px';
-                }
-            }
-
-            if (showExportPdfControl) {
-                const exportPdfButtonColumn = document.getElementById('print-pdf-btn-optional-column');
-                if (exportPdfButtonColumn) {
-                    exportPdfButtonColumn.style.opacity = 1.0;
-                }
-            }
-
-            const pageFormatControlColumn = document.getElementById("selectPageSize-optional-column");
-            if (pageFormatControlColumn) {
-                if (showPageFormatControl) {
-                    pageFormatControlColumn.style.opacity = 1.0;
-                } else {
-                    // showPageFormatControlColumn.innerHTML = "";
-                    // pageFormatControlColumn.style.minWidth = 0;
-                    // pageFormatControlColumn.style.width = 0;
-                    pageFormatControlColumn.style.display = 'none'; // squeezes buttons/columns
-                    // pageFormatControlColumn.style.visibility = 'hidden';
-
-                    // const optionalControlsColumnContainer = document.getElementById("optionalControlsColumnContainer");
-                    // optionalControlsColumnContainer.removeChild(pageFormatControlColumn);
-                    // optionalControlsColumnContainer.width *= 0.66;
-                    // optionalControls.witdh *= 0.66;
-                    // optionalControls.focus();
-                }
-            }
-        }
-
         // Create select
         for (name in samples) {
             if (samples.hasOwnProperty(name)) {
                 option = document.createElement("option");
                 option.value = samples[name];
                 option.textContent = name;
+                if (localStorage.getItem('scorename') === samples[name]) {
+                    option.selected = true
+                }
             }
             if (selectSample) {
                 selectSample.appendChild(option);
@@ -380,28 +247,6 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         if (selectSample) {
             selectSample.onchange = selectSampleOnChange;
         }
-        // if (selectBounding) {
-        //     selectBounding.onchange = selectBoundingOnChange;
-        // }
-
-        // for (const selectPageSize of selectPageSizes) {
-        //     if (selectPageSize) {
-        //         selectPageSize.onchange = function (evt) {
-        //             var value = evt.target.value;
-        //             openSheetMusicDisplay.setPageFormat(value);
-        //             openSheetMusicDisplay.render();
-        //         };
-        //     }
-        // }
-
-        // for (const printPdfBtn of printPdfBtns) {
-        //     if (printPdfBtn) {
-        //         printPdfBtn.onclick = function () {
-        //             createPdf();
-        //         }
-        //     }
-        // }
-
         // Pre-select default music piece
 
         custom.appendChild(document.createTextNode("Custom"));
@@ -423,32 +268,6 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
                 };
             }
         }
-
-        // if (skylineDebug) {
-        //     skylineDebug.onclick = function () {
-        //         openSheetMusicDisplay.DrawSkyLine = !openSheetMusicDisplay.DrawSkyLine;
-        //         openSheetMusicDisplay.render();
-        //     }
-        // }
-
-        // if (bottomlineDebug) {
-        //     bottomlineDebug.onclick = function () {
-        //         openSheetMusicDisplay.DrawBottomLine = !openSheetMusicDisplay.DrawBottomLine;
-        //         openSheetMusicDisplay.render();
-        //     }
-        // }
-
-        // if (debugReRenderBtn) {
-        //     debugReRenderBtn.onclick = function () {
-        //         rerender();
-        //     }
-        // }
-
-        // if (debugClearBtn) {
-        //     debugClearBtn.onclick = function () {
-        //         openSheetMusicDisplay.clear();
-        //     }
-        // }
 
         // Create OSMD object and canvas
         openSheetMusicDisplay = new OpenSheetMusicDisplay(canvas, {
@@ -632,11 +451,6 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         return result;
     }
 
-    // function selectBoundingOnChange(evt) {
-    //     var value = evt.target.value;
-    //     openSheetMusicDisplay.DrawBoundingBox = value;
-    // }
-
     function selectSampleOnChange(str) {
         error();
         disable();
@@ -644,6 +458,7 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         if (!isCustom) {
             if (selectSample) {
                 str = sampleFolder + selectSample.value;
+                localStorage.setItem('scorename', selectSample.value)
             } else {
                 if (samples && samples.length > 0) {
                     str = sampleFolder + samples[0];
@@ -857,68 +672,6 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         }
     }
 
-    /**
-     * Creates a Pdf of the currently rendered MusicXML
-     * @param pdfName if no name is given, the composer and title of the piece will be used
-     */
-    // async function createPdf(pdfName) {
-    //     if (openSheetMusicDisplay.backendType !== BackendType.SVG) {
-    //         console.log("[OSMD] createPdf(): Warning: createPDF is only supported for SVG background for now, not for Canvas." +
-    //             " Please use osmd.setOptions({backendType: SVG}).");
-    //         return;
-    //     }
-
-    //     if (pdfName === undefined) {
-    //         pdfName = openSheetMusicDisplay.sheet.FullNameString + ".pdf";
-    //     }
-
-    //     const backends = openSheetMusicDisplay.drawer.Backends;
-    //     let svgElement = backends[0].getSvgElement();
-
-    //     let pageWidth = 210;
-    //     let pageHeight = 297;
-    //     const engravingRulesPageFormat = openSheetMusicDisplay.rules.PageFormat;
-    //     if (engravingRulesPageFormat && !engravingRulesPageFormat.IsUndefined) {
-    //         pageWidth = engravingRulesPageFormat.width;
-    //         pageHeight = engravingRulesPageFormat.height;
-    //     } else {
-    //         pageHeight = pageWidth * svgElement.clientHeight / svgElement.clientWidth;
-    //     }
-
-    //     const orientation = pageHeight > pageWidth ? "p" : "l";
-    //     // create a new jsPDF instance
-    //     const pdf = new jsPDF.jsPDF({
-    //         orientation: orientation,
-    //         unit: "mm",
-    //         format: [pageWidth, pageHeight]
-    //     });
-    //     //const scale = pageWidth / svgElement.clientWidth;
-    //     for (let idx = 0, len = backends.length; idx < len; ++idx) {
-    //         if (idx > 0) {
-    //             pdf.addPage();
-    //         }
-    //         svgElement = backends[idx].getSvgElement();
-
-    //         if (!pdf.svg && !svg2pdf) { // this line also serves to make the svg2pdf not unused, though it's still necessary
-    //             // we need svg2pdf to have pdf.svg defined
-    //             console.log("svg2pdf missing, necessary for jspdf.svg().");
-    //             return;
-    //         }
-    //         await pdf.svg(svgElement, {
-    //             x: 0,
-    //             y: 0,
-    //             width: pageWidth,
-    //             height: pageHeight,
-    //         })
-    //     }
-
-    //     pdf.save(pdfName); // save/download the created pdf
-    //     //pdf.output("pdfobjectnewwindow", {filename: "osmd_createPDF.pdf"}); // open PDF in new tab/window
-
-    //     // note that using jspdf with svg2pdf creates unnecessary console warnings "AcroForm-Classes are not populated into global-namespace..."
-    //     // this will hopefully be fixed with a new jspdf release, see https://github.com/yWorks/jsPDF/pull/32
-    // }
-
     // Register events: load, drag&drop
     window.addEventListener("load", function () {
         init();
@@ -957,4 +710,32 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
             alert("No vaild .xml/.mxl/.musicxml file!");
         }
     });
+
+    // timing
+    var showTiming = document.getElementById('show-timing');
+    var timingWrapper = document.getElementById('timing');
+    var operator = document.getElementById('timing-operator');
+    var countStage = document.getElementById('counting');
+    var timeStage = document.getElementById('now');
+    function to10(num) {
+        if (num < 10) return '0' + num.toString()
+        if (num === 0) return '00'
+        return num
+    }
+    setInterval(() => {
+        var d = new Date();
+        timeStage.innerHTML = to10(d.getHours()) + ' : ' + to10(d.getMinutes()) + ' : ' + to10(d.getSeconds());
+        countStage.innerHTML = to10(Math.floor(time / 60)) + ' : ' + to10(time % 60);
+        if (isTiming) time += 1
+    }, 1000)
+
+    operator.onclick = function () {
+        isTiming = true;
+        time = 1
+    }
+
+    showTiming.onclick = function () {
+        isShowTime = !isShowTime
+        timingWrapper.style.display = isShowTime ? '' : 'none'
+    }
 }());
