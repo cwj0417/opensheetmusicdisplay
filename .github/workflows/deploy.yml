@@ -17,3 +17,4 @@ jobs:
           with:
             branch: page
             folder: build
+            
