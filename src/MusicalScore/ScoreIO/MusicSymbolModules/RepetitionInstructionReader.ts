@@ -34,9 +34,11 @@ export class RepetitionInstructionReader {
       let location: string = "";
       let hasRepeat: boolean = false;
       let direction: string = "";
+      let times: number = undefined;
       let type: string = "";
       let style: string = "";
       const endingIndices: number[] = [];
+      let endingText: string = undefined;
 
       // read barline style
       const styleNode: IXmlElement = barlineNode.element("bar-style");
@@ -58,32 +60,33 @@ export class RepetitionInstructionReader {
         if ("repeat" === childNode.name && childNode.hasAttributes) {
           hasRepeat = true;
           direction = childNode.attribute("direction").value;
+          // <repeat times>: how many times the repeated section is played (default 2). It wins over the number of lyric verses.
+          const timesValue: number = parseInt(childNode.attribute("times")?.value, 10);
+          if (timesValue > 0) {
+            times = timesValue;
+          }
         } else if ( "ending" === childNode.name && childNode.hasAttributes &&
                     childNode.attribute("type") !== undefined && childNode.attribute("number")) {
+          if (childNode.attribute("print-object")?.value === "no") {
+            continue;
+            // Finale only puts print-object="no" at the (duplicated) <ending> node at thestart of measure barline,
+            //   making this uneffective. Unclear whether the intention is to render the volta or not. (See #1367)
+          }
           type = childNode.attribute("type").value;
-          const num: string = childNode.attribute("number").value;
-
-          // Parse the given ending indices:
-          // handle cases like: "1, 2" or "1 + 2" or even "1 - 3, 6"
-          const separatedEndingIndices: string[] = num.split("[,+]");
-          for (let idx2: number = 0, len2: number = separatedEndingIndices.length; idx2 < len2; ++idx2) {
-            const separatedEndingIndex: string = separatedEndingIndices[idx2];
-            const indices: string[] = separatedEndingIndex.match("[0-9]");
-
-            // check if possibly something like "1-3" is given..
-            if (separatedEndingIndex.search("-") !== -1 && indices.length === 2) {
-              const startIndex: number = parseInt(indices[0], 10);
-              const endIndex: number = parseInt(indices[1], 10);
-              for (let index: number = startIndex; index <= endIndex; index++) {
-                endingIndices.push(index);
-              }
-            } else {
-              for (let idx3: number = 0, len3: number = indices.length; idx3 < len3; ++idx3) {
-                const index: string = indices[idx3];
-                endingIndices.push(parseInt(index, 10));
-              }
+          // The number attribute says on which passes the ending is played, e.g. "1, 3": on the first, and on the third,
+          //   after a D.S. or D.C. MusicXML spec: "The element text is used when the text displayed in the ending is different
+          //   than what appears in the number attribute." It's drawn instead of the numbers, e.g. "1., 3." or "Last time".
+          let numbers: number[] = RepetitionInstructionReader.readEndingNumbers(childNode.attribute("number").value);
+          const text: string = childNode.value.trim();
+          if (text) {
+            endingText = text;
+            // Finale v27.3 put the printed number here instead of in "number": number="1" for a "2" (#1367)
+            const textNumbers: number[] = RepetitionInstructionReader.readEndingNumbers(text);
+            if (textNumbers.length > 0 && !textNumbers.some((textNumber: number): boolean => numbers.includes(textNumber))) {
+              numbers = textNumbers;
             }
           }
+          endingIndices.push(...numbers);
         }
       }
 
@@ -96,6 +99,7 @@ export class RepetitionInstructionReader {
           if (type === "start") {
             const newInstruction: RepetitionInstruction = new RepetitionInstruction(this.currentMeasureIndex, RepetitionInstructionEnum.Ending,
                                                                                     AlignmentType.Begin, undefined, endingIndices);
+            newInstruction.Words = endingText;
             this.addInstruction(this.repetitionInstructions, newInstruction);
           }
           if (direction === "forward") {
@@ -108,9 +112,15 @@ export class RepetitionInstructionReader {
             const newInstruction: RepetitionInstruction = new RepetitionInstruction(this.currentMeasureIndex, RepetitionInstructionEnum.Ending,
                                                                                     AlignmentType.End, undefined, endingIndices);
             this.addInstruction(this.repetitionInstructions, newInstruction);
+          } else if (type === "discontinue") {
+            const newInstruction: RepetitionInstruction = new RepetitionInstruction(
+              this.currentMeasureIndex, RepetitionInstructionEnum.Ending,
+              AlignmentType.Discontinue, undefined, endingIndices);
+            this.addInstruction(this.repetitionInstructions, newInstruction);
           }
           if (direction === "backward") {
             const newInstruction: RepetitionInstruction = new RepetitionInstruction(this.currentMeasureIndex, RepetitionInstructionEnum.BackJumpLine);
+            newInstruction.Times = times;
             this.addInstruction(this.repetitionInstructions, newInstruction);
           }
         }
@@ -119,111 +129,82 @@ export class RepetitionInstructionReader {
     return pieceEndingDetected;
   }
 
-  public handleRepetitionInstructionsFromWordsOrSymbols(directionTypeNode: IXmlElement, relativeMeasurePosition: number): boolean {
+  /**
+   * Reads the passes an ending is played on from its number attribute or text, e.g. [1, 3] from "1, 3", "1,3" or "1., 3.".
+   * Ranges and plus signs aren't MusicXML, but are read too: [1, 2, 3, 6] from "1 - 3, 6", [1, 2] from "1 + 2".
+   */
+  private static readEndingNumbers(value: string): number[] {
+    const numbers: number[] = [];
+    for (const part of value.split(/[,+]/)) {
+      const numberTexts: string[] = part.match(/\d+/g) ?? [];
+      if (numberTexts.length === 2 && part.includes("-")) {
+        for (let index: number = parseInt(numberTexts[0], 10); index <= parseInt(numberTexts[1], 10); index++) {
+          numbers.push(index);
+        }
+      } else {
+        for (const numberText of numberTexts) {
+          numbers.push(parseInt(numberText, 10));
+        }
+      }
+    }
+    return numbers;
+  }
+
+  /**
+   * Reads a repetition instruction (e.g. D.S., Fine, a segno sign) from a direction.
+   * @param directionTypeNode the direction-type element (words, segno or coda)
+   * @param relativeMeasurePosition the position of the direction in the measure: a jump at 0 may be taken at the barline before
+   * @param soundNode the direction's sound element, if any: <sound segno="..."> marks a segno as the target of a D.S.
+   *   Its dacapo, dalsegno, fine, tocoda, segno and coda attributes say which instruction the direction is when its words
+   *   don't name one themselves, e.g. "Fin", "Da Capo bis Ende" or "D.C. senza replica".
+   * @returns true if the direction is a repetition instruction, false if it is drawn as text
+   */
+  public handleRepetitionInstructionsFromWordsOrSymbols(directionTypeNode: IXmlElement, relativeMeasurePosition: number,
+                                                        soundNode?: IXmlElement): boolean {
     const wordsNode: IXmlElement = directionTypeNode.element("words");
     const measureIndex: number = this.currentMeasureIndex;
     if (wordsNode) {
-      const dsRegEx: string = "d\\s?\\.s\\."; // Input for new RegExp(). TS eliminates the first \
-      // must Trim string and ToLower before compare
-      const innerText: string = wordsNode.value.trim().toLowerCase();
-      if (StringUtil.StringContainsSeparatedWord(innerText, dsRegEx + " al fine", true)) {
-        // @correctness i don't think we should manipulate the measure index by relative position [ssch]
-        //   it's clearly assigned a measure in the xml
-        //   this has misfired in the past, see test_staverepetitions_coda_etc_positioning.musicxml
-        //   there, it put the 'To Coda' in measure 1, same as the 'Signo', which was not correct.
-        // if (relativeMeasurePosition < 0.5 && this.currentMeasureIndex < this.xmlMeasureList[0].length - 1) { // not in last measure
-        //   measureIndex--;
-        // }
-        const newInstruction: RepetitionInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.DalSegnoAlFine);
-        this.addInstruction(this.repetitionInstructions, newInstruction);
-        return true;
-      }
-      const dcRegEx: string = "d\\.\\s?c\\.";
-      if (StringUtil.StringContainsSeparatedWord(innerText, dcRegEx + " al coda", true)) {
-        // if (relativeMeasurePosition < 0.5) {
-        //   measureIndex--;
-        // }
-        const newInstruction: RepetitionInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.DaCapoAlCoda);
-        this.addInstruction(this.repetitionInstructions, newInstruction);
-        return true;
-      }
-      if (StringUtil.StringContainsSeparatedWord(innerText, dcRegEx + " al fine", true)) {
-        // if (relativeMeasurePosition < 0.5 && this.currentMeasureIndex < this.xmlMeasureList[0].length - 1) { // not in last measure
-        //   measureIndex--;
-        // }
-        const newInstruction: RepetitionInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.DaCapoAlFine);
-        this.addInstruction(this.repetitionInstructions, newInstruction);
-        return true;
-      }
-      if (StringUtil.StringContainsSeparatedWord(innerText, dcRegEx + " al coda", true)) {
-        // if (relativeMeasurePosition < 0.5) {
-        //   measureIndex--;
-        // }
-        const newInstruction: RepetitionInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.DaCapoAlCoda);
-        this.addInstruction(this.repetitionInstructions, newInstruction);
-        return true;
-      }
-      if (StringUtil.StringContainsSeparatedWord(innerText, dcRegEx) ||
-        StringUtil.StringContainsSeparatedWord(innerText, "da\\s?capo", true)) {
-        // if (relativeMeasurePosition < 0.5 && this.currentMeasureIndex < this.xmlMeasureList[0].length - 1) { // not in last measure
-        //   measureIndex--;
-        // }
-        const newInstruction: RepetitionInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.DaCapo);
-        this.addInstruction(this.repetitionInstructions, newInstruction);
-        return true;
-      }
-      if (StringUtil.StringContainsSeparatedWord(innerText, dsRegEx, true) ||
-        StringUtil.StringContainsSeparatedWord(innerText, "dal\\s?segno", true)) {
-        // if (relativeMeasurePosition < 0.5 && this.currentMeasureIndex < this.xmlMeasureList[0].length - 1) { // not in last measure
-        //   measureIndex--;
-        // }
-        let newInstruction: RepetitionInstruction;
-        if (StringUtil.StringContainsSeparatedWord(innerText, "al\\s?coda", true)) {
-          newInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.DalSegnoAlCoda);
-        } else {
-          newInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.DalSegno);
+      // An exporter may split the words where their formatting changes.
+      const words: string = directionTypeNode.elements("words").map((node: IXmlElement): string => node.value).join("").trim();
+      // Measure positions aren't adjusted by the relative position in the measure (relativeMeasurePosition):
+      //   the instruction belongs to the measure it's written in (see test_staverepetitions_coda_etc_positioning.musicxml),
+      //   unless it is a jump at the very start of the measure that a sound element there states: the sound takes it at the
+      //   barline before (#1766).
+      let type: RepetitionInstructionEnum = RepetitionInstructionReader.repetitionInstructionFromWords(words.toLowerCase());
+      // the words drawn instead of the instruction's label, if they say more than it or say it in another language
+      let drawnWords: string = undefined;
+      if (type === undefined) {
+        // A D.C. or D.S. after a capitalized word, usually the section to play again, e.g. "Menuetto D.C." after a trio
+        const named: RegExpMatchArray = words.match(/^[A-Z][a-zA-Z]*\s+(.+)$/);
+        type = named ? RepetitionInstructionReader.repetitionInstructionFromWords(named[1].toLowerCase()) : undefined;
+        if (!RepetitionInstructionReader.isJumpFromWords(type)) {
+          // Words that don't name an instruction, e.g. in a language other than Italian or English, or with more words, e.g.
+          //   "D.C. senza replica": the sound says which instruction they are, if any.
+          //   Otherwise they are a general text -> render as text (e.g. UnknownExpression)
+          type = RepetitionInstructionReader.repetitionInstructionFromSound(soundNode);
+          if (type === undefined) {
+            return false;
+          }
         }
-        this.addInstruction(this.repetitionInstructions, newInstruction);
-        return true;
+        // (a segno or coda sign is drawn as the sign)
+        if (words.length > 0 && type !== RepetitionInstructionEnum.Segno && type !== RepetitionInstructionEnum.Coda) {
+          drawnWords = words.replace(/\s+/g, " "); // drawn in one line
+        }
       }
-      if (StringUtil.StringContainsSeparatedWord(innerText, "to\\s?coda", true) ||
-        StringUtil.StringContainsSeparatedWord(innerText, "a (la )?coda", true)) {
-        // if (relativeMeasurePosition < 0.5) {
-        //   measureIndex--;
-        // }
-        const newInstruction: RepetitionInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.ToCoda);
-        this.addInstruction(this.repetitionInstructions, newInstruction);
-        return true;
-      }
-      if (StringUtil.StringContainsSeparatedWord(innerText, "fine", true)) {
-        // if (relativeMeasurePosition < 0.5) {
-        //   measureIndex--;
-        // }
-        const newInstruction: RepetitionInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.Fine);
-        this.addInstruction(this.repetitionInstructions, newInstruction);
-        return true;
-      }
-      if (StringUtil.StringContainsSeparatedWord(innerText, "coda", true)) {
-        // if (relativeMeasurePosition > 0.5) {
-        //   measureIndex++;
-        // }
-        const newInstruction: RepetitionInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.Coda);
-        this.addInstruction(this.repetitionInstructions, newInstruction);
-        return true;
-      }
-      if (StringUtil.StringContainsSeparatedWord(innerText, "segno", true)) {
-        // if (relativeMeasurePosition > 0.5) {
-        //   measureIndex++;
-        // }
-        const newInstruction: RepetitionInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.Segno);
-        this.addInstruction(this.repetitionInstructions, newInstruction);
-        return true;
-      }
+      const soundType: RepetitionInstructionEnum = RepetitionInstructionReader.soundTypeOfJump(type);
+      const atBarlineBefore: boolean = relativeMeasurePosition === 0 && measureIndex > 0 && soundType !== undefined &&
+        this.isStatedAtMeasureStart(soundType);
+      const newInstruction: RepetitionInstruction = new RepetitionInstruction(atBarlineBefore ? measureIndex - 1 : measureIndex, type);
+      newInstruction.Words = drawnWords;
+      newInstruction.MarkedAsTarget = type === RepetitionInstructionEnum.Segno && !!soundNode?.attribute("segno");
+      this.addInstruction(this.repetitionInstructions, newInstruction, atBarlineBefore);
+      return true;
     } else if (directionTypeNode.element("segno")) {
       // if (relativeMeasurePosition > 0.5) {
       //   measureIndex++;
       // }
       const newInstruction: RepetitionInstruction = new RepetitionInstruction(measureIndex, RepetitionInstructionEnum.Segno);
+      newInstruction.MarkedAsTarget = !!soundNode?.attribute("segno");
       this.addInstruction(this.repetitionInstructions, newInstruction);
       return true;
     } else if (directionTypeNode.element("coda")) {
@@ -235,6 +216,120 @@ export class RepetitionInstructionReader {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Returns the repetition instruction that the words are, or undefined if they are a general text,
+   * which may mention an instruction, e.g. "voice tacet on D.S." (see #1687).
+   * @param text the words, trimmed and in lower case
+   */
+  private static repetitionInstructionFromWords(text: string): RepetitionInstructionEnum {
+    // regex strings: inputs for new RegExp(). The string escaping eliminates the first backslash of each \\.
+    const dalSegno: string = "(d\\s?\\.\\s?s\\.|dal\\s?segno)"; // "d.s.", also with spaces, e.g. "d. s."
+    const daCapo: string = "(d\\s?\\.\\s?c\\.|da\\s?capo)"; // "d.c.", also with spaces
+    const al: string = "\\s?al\\s?"; // also without a space, e.g. "D.C.al Fine"
+    const instructions: [string, RepetitionInstructionEnum][] = [
+      [dalSegno + al + "fine", RepetitionInstructionEnum.DalSegnoAlFine],
+      [dalSegno + al + "coda", RepetitionInstructionEnum.DalSegnoAlCoda],
+      [dalSegno, RepetitionInstructionEnum.DalSegno],
+      [daCapo + al + "fine", RepetitionInstructionEnum.DaCapoAlFine],
+      [daCapo + al + "coda", RepetitionInstructionEnum.DaCapoAlCoda],
+      [daCapo, RepetitionInstructionEnum.DaCapo],
+      ["to\\s?coda|a (la )?coda", RepetitionInstructionEnum.ToCoda],
+      ["fine", RepetitionInstructionEnum.Fine],
+      ["coda", RepetitionInstructionEnum.Coda],
+      ["segno", RepetitionInstructionEnum.Segno],
+    ];
+    for (const [regEx, type] of instructions) {
+      if (StringUtil.StringIsWord(text, regEx, true)) {
+        return type;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Returns the repetition instruction that the sound element's attributes mark, whatever the language of the words,
+   * or undefined if they mark none.
+   * @param soundNode the direction's sound element, if any
+   */
+  private static repetitionInstructionFromSound(soundNode: IXmlElement): RepetitionInstructionEnum {
+    const instructions: [string, RepetitionInstructionEnum][] = [
+      ["dacapo", RepetitionInstructionEnum.DaCapo],
+      ["dalsegno", RepetitionInstructionEnum.DalSegno],
+      ["tocoda", RepetitionInstructionEnum.ToCoda],
+      ["fine", RepetitionInstructionEnum.Fine],
+      ["segno", RepetitionInstructionEnum.Segno],
+      ["coda", RepetitionInstructionEnum.Coda],
+    ];
+    for (const [attributeName, type] of instructions) {
+      const value: string = soundNode?.attribute(attributeName)?.value;
+      if (attributeName === "dacapo" ? value === "yes" : !!value) {
+        return type;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Returns the instruction a sound element states for the jump (see repetitionInstructionFromSound), e.g. a D.S. for a
+   * D.S. al Coda, or undefined if the instruction isn't a jump: a segno or coda sign marks where the music lands.
+   */
+  private static soundTypeOfJump(type: RepetitionInstructionEnum): RepetitionInstructionEnum {
+    switch (type) {
+      case RepetitionInstructionEnum.DaCapo:
+      case RepetitionInstructionEnum.DaCapoAlFine:
+      case RepetitionInstructionEnum.DaCapoAlCoda:
+        return RepetitionInstructionEnum.DaCapo;
+      case RepetitionInstructionEnum.DalSegno:
+      case RepetitionInstructionEnum.DalSegnoAlFine:
+      case RepetitionInstructionEnum.DalSegnoAlCoda:
+        return RepetitionInstructionEnum.DalSegno;
+      case RepetitionInstructionEnum.ToCoda:
+      case RepetitionInstructionEnum.Fine:
+        return type;
+      default:
+        return undefined;
+    }
+  }
+
+  /** Whether a sound element at the start of the current measure (before its first note or forward), in any part,
+   *  states the instruction (see repetitionInstructionFromSound). */
+  private isStatedAtMeasureStart(type: RepetitionInstructionEnum): boolean {
+    for (const partMeasures of this.xmlMeasureList) {
+      for (const node of partMeasures?.[this.currentMeasureIndex]?.elements() ?? []) {
+        if (node.name === "note" || node.name === "forward") {
+          break;
+        }
+        const sounds: IXmlElement[] = node.name === "direction" ? node.elements("sound") : node.name === "sound" ? [node] : [];
+        const directionOffset: IXmlElement = node.name === "direction" ? node.element("offset") : undefined;
+        if (sounds.some((sound: IXmlElement): boolean => {
+          // A sound's offset overrides a playback direction offset; a visual-only offset does not move the sound.
+          const offset: IXmlElement = sound.element("offset") ??
+            (directionOffset?.attribute("sound")?.value === "yes" ? directionOffset : undefined);
+          return (offset === undefined || Number(offset.value) === 0) &&
+            RepetitionInstructionReader.repetitionInstructionFromSound(sound) === type;
+        })) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Whether the instruction type is a D.C. or D.S. (with or without al Fine / al Coda). */
+  private static isJumpFromWords(type: RepetitionInstructionEnum): boolean {
+    switch (type) {
+      case RepetitionInstructionEnum.DaCapo:
+      case RepetitionInstructionEnum.DaCapoAlFine:
+      case RepetitionInstructionEnum.DaCapoAlCoda:
+      case RepetitionInstructionEnum.DalSegno:
+      case RepetitionInstructionEnum.DalSegnoAlFine:
+      case RepetitionInstructionEnum.DalSegnoAlCoda:
+        return true;
+      default:
+        return false;
+    }
   }
 
   public removeRedundantInstructions(): void {
@@ -260,7 +355,9 @@ export class RepetitionInstructionReader {
           // }
           break;
         case RepetitionInstructionEnum.Segno:
-          if (segnoCount - dalSegnaCount > 0) { // two segnos in a row
+          // Two segnos in a row: the second one is taken for a D.S. back to the first (e.g. a renvoi sign),
+          //   unless the MusicXML marks it as a D.S. target itself (a segno that a later D.S. jumps to).
+          if (segnoCount - dalSegnaCount > 0 && !instruction.MarkedAsTarget) {
             let foundInstruction: boolean = false;
             for (let idx: number = 0, len: number = this.repetitionInstructions.length; idx < len; ++idx) {
               const instr: RepetitionInstruction = this.repetitionInstructions[idx];
@@ -324,6 +421,7 @@ export class RepetitionInstructionReader {
           case RepetitionInstructionEnum.Segno:
             segnoCount++;
             break;
+          case RepetitionInstructionEnum.DalSegno: // it uses the segno before it, so a segno after it is a new one
           case RepetitionInstructionEnum.DalSegnoAlFine:
           case RepetitionInstructionEnum.DalSegnoAlCoda:
             dalSegnaCount++;
@@ -356,17 +454,43 @@ export class RepetitionInstructionReader {
     return false;
   }
 
-  private addInstruction(currentRepetitionInstructions: RepetitionInstruction[], newInstruction: RepetitionInstruction): void {
+  /**
+   * Adds the instruction unless the list has it already.
+   * @param atBarlineBefore whether it's a jump read at the start of its measure but taken at the barline before (#1766).
+   *   It goes where words at the end of the measure before would be read, so that the repetition calculator, which handles
+   *   the list in order, treats both the same: before the instructions read since, those of the barline before (a backward
+   *   repeat, an ending's end) and those of its own measure (e.g. an ending's start).
+   */
+  private addInstruction(currentRepetitionInstructions: RepetitionInstruction[], newInstruction: RepetitionInstruction,
+                         atBarlineBefore: boolean = false): void {
     let addInstruction: boolean = true;
     for (let idx: number = 0, len: number = currentRepetitionInstructions.length; idx < len; ++idx) {
       const repetitionInstruction: RepetitionInstruction = currentRepetitionInstructions[idx];
       if (newInstruction.equals(repetitionInstruction)) {
         addInstruction = false;
+        if (!(repetitionInstruction.Times > 0) && newInstruction.Times > 0) {
+          repetitionInstruction.Times = newInstruction.Times; // e.g. only a later part writes the repeat's times
+        }
         break;
       }
     }
     if (addInstruction) {
-      currentRepetitionInstructions.push(newInstruction);
+      let index: number = currentRepetitionInstructions.length;
+      // Parts are read in turn, so ordinary instructions can follow another part's right barline.
+      for (let idx: number = 0, len: number = currentRepetitionInstructions.length; atBarlineBefore && idx < len; ++idx) {
+        if (RepetitionInstructionReader.isAfterWordsAtMeasureEnd(currentRepetitionInstructions[idx], newInstruction.measureIndex)) {
+          index = idx;
+          break;
+        }
+      }
+      currentRepetitionInstructions.splice(index, 0, newInstruction);
     }
+  }
+
+  /** Whether the instruction is read after words at the end of the measure: at the measure's right barline or later. */
+  private static isAfterWordsAtMeasureEnd(instruction: RepetitionInstruction, measureIndex: number): boolean {
+    return instruction.measureIndex > measureIndex ||
+      instruction.measureIndex === measureIndex && (instruction.type === RepetitionInstructionEnum.BackJumpLine ||
+        instruction.type === RepetitionInstructionEnum.Ending && instruction.alignment !== AlignmentType.Begin);
   }
 }

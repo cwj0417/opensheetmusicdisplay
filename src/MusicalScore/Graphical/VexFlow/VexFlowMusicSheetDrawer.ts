@@ -19,6 +19,8 @@ import { GraphicalLyricEntry } from "../GraphicalLyricEntry";
 import { VexFlowStaffLine } from "./VexFlowStaffLine";
 import { StaffLine } from "../StaffLine";
 import { GraphicalSlur } from "../GraphicalSlur";
+import { GraphicalNote } from "../GraphicalNote";
+import { GraphicalMeasure } from "../GraphicalMeasure";
 import { PlacementEnum } from "../../VoiceData/Expressions/AbstractExpression";
 import { GraphicalInstantaneousTempoExpression } from "../GraphicalInstantaneousTempoExpression";
 import { GraphicalInstantaneousDynamicExpression } from "../GraphicalInstantaneousDynamicExpression";
@@ -33,8 +35,10 @@ import { VexFlowPedal } from "./VexFlowPedal";
 import { GraphicalGlissando } from "../GraphicalGlissando";
 import { VexFlowGlissando } from "./VexFlowGlissando";
 import { VexFlowGraphicalNote } from "./VexFlowGraphicalNote";
-import { SvgVexFlowBackend } from "./SvgVexFlowBackend";
-import { CanvasVexFlowBackend } from "./CanvasVexFlowBackend";
+import { VexFlowConverter } from "./VexFlowConverter";
+import { VexFlowVibratoBracket } from "./VexFlowVibratoBracket";
+import { TremoloBetweenNotes } from "../../VoiceData/Note";
+import { SkyBottomLineCalculator } from "../SkyBottomLineCalculator";
 
 /**
  * This is a global constant which denotes the height in pixels of the space between two lines of the stave
@@ -97,10 +101,16 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         this.pageIdx += 1;
     }
 
+    /** Clears what was drawn (the backends), and releases the drawn sheet and its pages, which the drawer only needs while drawing:
+     *  their graphical objects reference the drawn SVG elements, so they would keep the whole rendering in memory.
+     *  drawSheet() sets them again.
+     */
     public clear(): void {
         for (const backend of this.backends) {
             backend.clear();
+            backend.graphicalMusicPage = undefined;
         }
+        this.graphicalMusicSheet = undefined;
     }
 
     public setZoom(zoom: number): void {
@@ -117,6 +127,15 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
     }
 
     protected drawStaffLine(staffLine: StaffLine): void {
+        const ctx: Vex.IRenderContext = this.backend.getContext();
+        const stafflineNode: Node = ctx.openGroup();
+        if (stafflineNode) {
+            (stafflineNode as SVGGElement).classList.add("osmd-staffline");
+            // lazy horizontal: each batch draws its part of the staffline into a group of its own, the first one has the id
+            if (staffLine.ParentStaff && this.lazyDrawsLeftEdgeOnce()) {
+                (stafflineNode as SVGGElement).id = this.getStaffLineSVGGElementId(staffLine);
+            }
+        }
         super.drawStaffLine(staffLine);
         const absolutePos: PointF2D = staffLine.PositionAndShape.AbsolutePosition;
         if (this.rules.RenderSlurs) {
@@ -125,45 +144,132 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         if (this.rules.RenderGlissandi) {
             this.drawGlissandi(staffLine as VexFlowStaffLine, absolutePos);
         }
+        ctx.closeGroup();
+    }
+
+    /**
+     * Gets the id of the SVG group a staffline is drawn into (g.osmd-staffline), unique in the sheet's drawing: "osmd-staffline",
+     * its system's index (MusicSystem.Id, counted from 0 through the pages), "-" and its staff's index in Sheet.Staves (from 0,
+     * as in the measures' ids, see GraphicalMeasure.getSVGGElementId()): "osmd-staffline3-1" is the second staff of the 4th
+     * system. Lazy horizontal rendering (renderNext() with RenderSingleHorizontalStaffline) draws a staffline into a group per
+     * batch: the first one, which starts the staffline, has the id.
+     */
+    protected getStaffLineSVGGElementId(staffLine: StaffLine): string {
+        return `osmd-staffline${staffLine.ParentMusicSystem.Id}-${staffLine.ParentStaff.idInMusicSheet}`;
     }
 
     private drawSlurs(vfstaffLine: VexFlowStaffLine, absolutePos: PointF2D): void {
         for (const graphicalSlur of vfstaffLine.GraphicalSlurs) {
-            // don't draw crossed slurs, as their curve calculation is not implemented yet:
-            if (graphicalSlur.slur.isCrossed()) {
+            // lazy horizontal: gate by the slur's actual note x-positions (forward-stable), not its bezier
+            // points. Cross-staff slurs recompute their bezier here (at draw time) and can be degenerate in a
+            // partial layout, so a bezier-based gate would let them slip into several batches at once.
+            if (!this.lazyDrawsSlur(graphicalSlur)) {
                 continue;
+            }
+            if (graphicalSlur.slur.isCrossed()) {
+                if (!this.rules.RenderSlursAcrossStaves) {
+                    continue; // cross-staff slurs disabled (supplementary to RenderSlurs)
+                }
+                // A cross-staff slur spans two stafflines, so its curve is calculated here (at draw time, when
+                // both stafflines have their final positions) rather than in calculateSlurs(). It is attached
+                // to the start note's staffline, so absolutePos already refers to that staffline.
+                if (!graphicalSlur.calculateCurveCrossStaff(this.rules)) {
+                    continue; // couldn't be calculated (e.g. notes in different systems)
+                }
             }
             this.drawSlur(graphicalSlur, absolutePos);
         }
     }
 
+    /** Lazy horizontal rendering: whether a slur belongs in this batch's draw x-window, based on the absolute
+     *  x of its start/end notes (forward-stable as the prefix grows). Returns true when not lazy-horizontal, or
+     *  when the notes can't be located (don't suppress). See drawSlurs() for why we avoid the bezier points. */
+    private lazyDrawsSlur(graphicalSlur: GraphicalSlur): boolean {
+        if (this.LazyDrawFromXUnits === Number.NEGATIVE_INFINITY && this.LazyDrawToXUnits === Number.POSITIVE_INFINITY) {
+            return true;
+        }
+        let rightX: number = Number.NEGATIVE_INFINITY;
+        const startGNote: GraphicalNote = this.rules.GNote(graphicalSlur.slur.StartNote);
+        const endGNote: GraphicalNote = graphicalSlur.slur.EndNote ? this.rules.GNote(graphicalSlur.slur.EndNote) : undefined;
+        if (startGNote) {
+            rightX = Math.max(rightX, startGNote.PositionAndShape.AbsolutePosition.x);
+        }
+        if (endGNote) {
+            rightX = Math.max(rightX, endGNote.PositionAndShape.AbsolutePosition.x);
+        }
+        // Fallback (e.g. a slur continuing from another staffline where GNote is unavailable): the slur's
+        // graphical staff entries are always present and forward-stable, and bound its x-extent.
+        for (const staffEntry of graphicalSlur.staffEntries) {
+            rightX = Math.max(rightX, staffEntry.PositionAndShape.AbsolutePosition.x + staffEntry.PositionAndShape.BorderRight);
+        }
+        if (rightX === Number.NEGATIVE_INFINITY) {
+            return true; // couldn't locate the slur at all; don't suppress it
+        }
+        return this.lazyDrawsAtX(rightX);
+    }
+
     private drawGlissandi(vfStaffLine: VexFlowStaffLine, absolutePos: PointF2D): void {
         for (const gGliss of vfStaffLine.GraphicalGlissandi) {
+            if (!this.lazyDrawsGlissando(gGliss)) {
+                continue; // lazy horizontal: drawn with the batch whose x-window its end enters, like a slur
+            }
             this.drawGlissando(gGliss, absolutePos);
         }
+    }
+
+    /**
+     * Lazy horizontal rendering: whether a glissando belongs in this batch's draw x-window, by the right edge of its
+     * staff entries in this staffline.
+     * @param gGliss the glissando (the part of it in one staffline)
+     * @returns true when not lazy-horizontal, or when the glissando has no staff entries (don't suppress it)
+     */
+    private lazyDrawsGlissando(gGliss: GraphicalGlissando): boolean {
+        let rightX: number = Number.NEGATIVE_INFINITY;
+        for (const staffEntry of gGliss.staffEntries) {
+            rightX = Math.max(rightX, staffEntry.PositionAndShape.AbsolutePosition.x + staffEntry.PositionAndShape.BorderRight);
+        }
+        return rightX === Number.NEGATIVE_INFINITY || this.lazyDrawsAtX(rightX);
     }
 
     private drawGlissando(gGliss: GraphicalGlissando, abs: PointF2D): void {
         if (!gGliss.StaffLine.ParentStaff.isTab) {
             gGliss.calculateLine(this.rules);
         }
+        const vfTie: VF.StaveTie = (gGliss as VexFlowGlissando).vfTie;
+        if (!gGliss.Line && !vfTie) {
+            return;
+        }
+        // Draw the glissando in a group with an id from its start note, like a slur or tie, so that the note can find it,
+        //   e.g. to hide it (VexFlowGraphicalNote.getGlissandoSVGs()). In a TAB staff, the group holds the line and the label "sl."
+        //   that the Vexflow TabSlide draws. The part of a glissando continued in the next system gets the id too,
+        //   unlike a Vexflow tie, which would take it from its first note, missing there.
+        const context: IRenderContext = this.backend.getContext();
+        const startNoteId: string = (this.rules.GNote(gGliss.Glissando.StartNote) as VexFlowGraphicalNote)?.getSVGId();
+        context.openGroup("glissando", startNoteId ? `${startNoteId}-glissando` : undefined);
         if (gGliss.Line) {
             const newStart: PointF2D = new PointF2D(gGliss.Line.Start.x + abs.x, gGliss.Line.Start.y);
             const newEnd: PointF2D = new PointF2D(gGliss.Line.End.x + abs.x, gGliss.Line.End.y);
             // note that we do not add abs.y, because GraphicalGlissando.calculateLine() uses AbsolutePosition for y,
             //   because unfortunately RelativePosition seems imprecise.
-            this.drawLine(newStart, newEnd, gGliss.Color, gGliss.Width);
+            gGliss.Line.SVGElement = this.drawLine(newStart, newEnd, gGliss.Color, gGliss.Width);
         } else {
-            const vfTie: VF.StaveTie = (gGliss as VexFlowGlissando).vfTie;
-            if (vfTie) {
-                const context: IRenderContext = this.backend.getContext();
-                vfTie.setContext(context);
-                vfTie.draw();
-            }
+            vfTie.setContext(context);
+            vfTie.draw();
         }
+        context.closeGroup();
     }
 
     private drawSlur(graphicalSlur: GraphicalSlur, abs: PointF2D): void {
+        // lazy horizontal: the x-window gate is applied in drawSlurs() by note position (see lazyDrawsSlur)
+        for (const bezierPoint of [graphicalSlur.bezierStartPt, graphicalSlur.bezierStartControlPt,
+            graphicalSlur.bezierEndControlPt, graphicalSlur.bezierEndPt]) {
+            if (!bezierPoint || !Number.isFinite(bezierPoint.x) || !Number.isFinite(bezierPoint.y)) {
+                // would create an invalid SVG path (e.g. NaN coordinates from a degenerate curve calculation)
+                log.warn("VexFlowMusicSheetDrawer.drawSlur: skipping slur with invalid bezier points, measure " +
+                    graphicalSlur.staffEntries[0]?.parentMeasure?.MeasureNumber);
+                return;
+            }
+        }
         const curvePointsInPixels: PointF2D[] = [];
         // 1) create inner or original curve:
         const p1: PointF2D = new PointF2D(graphicalSlur.bezierStartPt.x + abs.x, graphicalSlur.bezierStartPt.y + abs.y);
@@ -201,10 +307,15 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         curvePointsInPixels.push(this.applyScreenTransformation(p2));
         curvePointsInPixels.push(this.applyScreenTransformation(p3));
         curvePointsInPixels.push(this.applyScreenTransformation(p4));
-        graphicalSlur.SVGElement = this.backend.renderCurve(curvePointsInPixels);
+        const startNote: VexFlowGraphicalNote = this.rules.GNote(graphicalSlur.slur.StartNote) as VexFlowGraphicalNote;
+        graphicalSlur.SVGElement = this.backend.renderCurve(curvePointsInPixels, true, startNote);
+        this.addSVGClass(graphicalSlur.SVGElement, "osmd-slur");
     }
 
     protected drawMeasure(measure: VexFlowMeasure): void {
+        if (!this.lazyDrawsObject(measure.PositionAndShape)) {
+            return; // lazy horizontal: this measure is outside the batch's draw x-window
+        }
         measure.setAbsoluteCoordinates(
             measure.PositionAndShape.AbsolutePosition.x * unitInPixels,
             measure.PositionAndShape.AbsolutePosition.y * unitInPixels
@@ -217,39 +328,42 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         }
 
         let newBuzzRollId: number = 0;
-        // Draw the StaffEntries
+        // Draw the StaffEntries. Their labels (chord symbols, fingerings, lyrics) are drawn with the measure, also where
+        //   they reach beyond its right edge: the lazy x-window gated the measure, and the next batch doesn't draw it again.
+        const forceLabels: boolean = this.LazyForcePageLabels;
+        this.LazyForcePageLabels = true;
         for (const staffEntry of measure.staffEntries) {
             this.drawStaffEntry(staffEntry);
-            newBuzzRollId = this.drawBuzzRolls(staffEntry, newBuzzRollId);
+            if (!measure.NotesAreAbbreviated) { // these notes aren't drawn either (EngravingRules.RenderMeasureRepeats)
+                newBuzzRollId = this.drawBuzzRolls(staffEntry, newBuzzRollId);
+            }
+        }
+        this.LazyForcePageLabels = forceLabels;
+        if (!measure.NotesAreAbbreviated) {
+            this.drawTremolosBetweenNotes(measure);
         }
     }
 
     protected drawBuzzRolls(staffEntry: GraphicalStaffEntry, newBuzzRollId): number {
         for (const gve of staffEntry.graphicalVoiceEntries) {
             for (const note of gve.notes) {
-                if (note.sourceNote.TremoloInfo?.tremoloUnmeasured) {
+                // not for a note that isn't drawn: hidden (print-object="no") or of a hidden voice, see Note.isVisible()
+                if (note.sourceNote.TremoloInfo?.tremoloUnmeasured && note.sourceNote.isVisible()) {
                     const thickness: number = this.rules.TremoloBuzzRollThickness;
                     const baseLength: number = 0.9;
                     const baseHeight: number = 0.5;
 
                     const vfNote: VexFlowGraphicalNote = note as VexFlowGraphicalNote;
-                    let stemTip: PointF2D;
-                    let stemHeight: number;
                     const directionSign: number = vfNote.vfnote[0].getStemDirection(); // 1 or -1
-                    if (this.backend instanceof SvgVexFlowBackend) {
-                        const stemElement: HTMLElement = vfNote.getStemSVG();
-                        const rect: SVGRect = (stemElement as any).getBBox();
-                        stemTip = new PointF2D(rect.x / 10, rect.y / 10);
-                        stemHeight = rect.height / 10;
-                    } else if (this.backend instanceof CanvasVexFlowBackend) {
-                        stemHeight = vfNote.vfnote[0].getStemLength() / 10;
-                        stemTip = new PointF2D(
-                            (vfNote.vfnote[0].getStem() as any).x_begin / 10,
-                            (vfNote.vfnote[0].getStem() as any).y_top / 10,
-                        );
-                        if (directionSign === 1) {
-                            stemTip.y -= stemHeight;
-                        }
+                    // the stem's top end (an up stem's tip, a down stem's top notehead) and length, from VexFlow's stem data:
+                    //   the same for both backends and in jsdom (browserless export), which has no getBBox() for the stem's SVG element
+                    const stemHeight: number = vfNote.vfnote[0].getStemLength() / 10;
+                    const stemTip: PointF2D = new PointF2D(
+                        (vfNote.vfnote[0].getStem() as any).x_begin / 10,
+                        (vfNote.vfnote[0].getStem() as any).y_top / 10,
+                    );
+                    if (directionSign === 1) {
+                        stemTip.y -= stemHeight;
                     }
                     // this.DrawOverlayLine(stemTip, new PointF2D(stemTip.x + 5, stemTip.y), vfNote.ParentMusicPage); // debug
 
@@ -285,12 +399,228 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
                         currentPoint = pathPoints.last();
                         pathPoints.push(new PointF2D(currentPoint.x + movement.x, currentPoint.y - movement.y));
                     }
-                    this.DrawPath(pathPoints, vfNote.ParentMusicPage, true, `buzzRoll${newBuzzRollId}`);
+                    const node: Node = this.DrawPath(pathPoints, vfNote.ParentMusicPage, true);
+                    this.setSVGId(node, this.getMeasureElementSVGId("buzz", staffEntry.parentMeasure, newBuzzRollId));
+                    this.addSVGClass(node, "osmd-tremolo"); // a buzz roll is an unmeasured tremolo (MusicXML)
                     newBuzzRollId++;
                 }
             }
         }
         return newBuzzRollId;
+    }
+
+    /** Draws the strokes ("tremolo beams") of tremolos between two notes in this measure,
+     *  e.g. two alternating half notes with 3 strokes between them, often seen in orchestral string parts.
+     *  (Vexflow doesn't support these tremolos, so we draw them ourselves here.)
+     *  Also updates the SkyLine/BottomLine where the strokes exceed it.
+     *  Not where a note isn't drawn (see Note.isVisible()): the strokes are left out with it, like those of a single-note
+     *  tremolo, which Vexflow draws in the style of its notehead (transparent then).
+     */
+    protected drawTremolosBetweenNotes(measure: VexFlowMeasure): void {
+        if (measure.isTabMeasure) {
+            return;
+        }
+        let strokeId: number = 0;
+        for (const staffEntry of measure.staffEntries) {
+            for (const gve of staffEntry.graphicalVoiceEntries) {
+                for (const gNote of gve.notes) {
+                    const tremolo: TremoloBetweenNotes = gNote.sourceNote.TremoloInfo?.tremoloBetweenNotes;
+                    if (!tremolo || tremolo.stopNote !== gNote.sourceNote || !(tremolo.strokes > 0)) {
+                        continue;
+                        // only draw when reaching the stop note (second note): at this point, both notes have been drawn
+                        //   and have their final positions, even if the start note is in a previously drawn measure.
+                    }
+                    if (tremolo.startNote?.isVisible() === false || !gNote.sourceNote.isVisible()) {
+                        continue; // a note isn't drawn: hidden (print-object="no") or of a hidden voice, see Note.isVisible()
+                    }
+                    try {
+                        strokeId = this.drawTremoloBetweenTwoNotes(tremolo, gNote as VexFlowGraphicalNote, measure, strokeId);
+                    } catch (ex) {
+                        log.warn("VexFlowMusicSheetDrawer.drawTremolosBetweenNotes", ex);
+                    }
+                }
+            }
+        }
+    }
+
+    /** Draws the strokes between the two notes of a TremoloBetweenNotes (see drawTremolosBetweenNotes). */
+    private drawTremoloBetweenTwoNotes(tremolo: TremoloBetweenNotes, stopGNote: VexFlowGraphicalNote,
+                                       measure: VexFlowMeasure, strokeId: number): number {
+        if (tremolo.startNote.isRest() || tremolo.stopNote.isRest()) {
+            return strokeId; // a tremolo between a note and a rest is invalid
+        }
+        const startGNote: VexFlowGraphicalNote = this.rules.GNote(tremolo.startNote) as VexFlowGraphicalNote;
+        if (!startGNote?.vfnote || !stopGNote.vfnote) {
+            return strokeId; // e.g. note not rendered (multiple rest measure)
+        }
+        const staffLine: StaffLine = measure.ParentStaffLine;
+        if (startGNote.parentVoiceEntry.parentStaffEntry.parentMeasure.ParentStaffLine !== staffLine) {
+            log.debug("VexFlowMusicSheetDrawer.drawTremoloBetweenTwoNotes: start and stop note are not in the same staffline " +
+                "(e.g. tremolo across a system break), not drawing tremolo strokes.");
+            return strokeId;
+        }
+        const vfStartNote: VF.StemmableNote = startGNote.vfnote[0];
+        const vfStopNote: VF.StemmableNote = stopGNote.vfnote[0];
+        if (vfStartNote.getAttribute("type") === "GhostNote" || vfStopNote.getAttribute("type") === "GhostNote") {
+            return strokeId; // invisible notes (print-object="no")
+        }
+
+        // stroke dimensions (in units):
+        const strokeThickness: number = this.rules.TremoloBetweenNotesStrokeThickness;
+        const strokePeriod: number = strokeThickness + this.rules.TremoloBetweenNotesStrokeGap;
+        const totalStrokesHeight: number = tremolo.strokes * strokeThickness + (tremolo.strokes - 1) * this.rules.TremoloBetweenNotesStrokeGap;
+        const yPadding: number = this.rules.TremoloBetweenNotesYPadding;
+
+        // calculate the anchor points of the line on which the strokes are centered (in pixels):
+        let startXPx: number;
+        let stopXPx: number;
+        let startYPx: number;
+        let stopYPx: number;
+        // allowed y range for the stroke group center at each note (in units), so that the strokes
+        //   keep their distance from the noteheads and don't exceed the stem tips (used for stemmed notes):
+        let startCenterMinY: number = -Infinity;
+        let startCenterMaxY: number = Infinity;
+        let stopCenterMinY: number = -Infinity;
+        let stopCenterMaxY: number = Infinity;
+        const startNoteHasStem: boolean = (vfStartNote as any).hasStem?.() && !!vfStartNote.getStem();
+        const stopNoteHasStem: boolean = (vfStopNote as any).hasStem?.() && !!vfStopNote.getStem();
+        if (startNoteHasStem && stopNoteHasStem && vfStartNote.getStemDirection() === vfStopNote.getStemDirection()) {
+            // anchor the strokes between the stems, in the middle of the "free" stem region between (inner) notehead and stem tip
+            const direction: number = vfStartNote.getStemDirection(); // 1: up, -1: down
+            startXPx = vfStartNote.getStemX();
+            stopXPx = vfStopNote.getStemX();
+            const startYs: number[] = vfStartNote.getYs();
+            const stopYs: number[] = vfStopNote.getYs();
+            // y of the notehead the free stem region begins at (for chords, the notehead closest to the stem tip):
+            const startInnerNoteheadY: number = direction === 1 ? Math.min(...startYs) : Math.max(...startYs);
+            const stopInnerNoteheadY: number = direction === 1 ? Math.min(...stopYs) : Math.max(...stopYs);
+            // measure the free stem region from the notehead's outer edge (~0.5 units from its center),
+            //   so that the strokes get equal visual clearance from notehead and stem tip:
+            const noteheadEdgeOffsetPx: number = direction * 0.5 * unitInPixels;
+            const startTipY: number = vfStartNote.getStemExtents().topY / unitInPixels;
+            const stopTipY: number = vfStopNote.getStemExtents().topY / unitInPixels;
+            const startNoteheadEdgeY: number = (startInnerNoteheadY - noteheadEdgeOffsetPx) / unitInPixels;
+            const stopNoteheadEdgeY: number = (stopInnerNoteheadY - noteheadEdgeOffsetPx) / unitInPixels;
+            startYPx = (startTipY + startNoteheadEdgeY) / 2 * unitInPixels;
+            stopYPx = (stopTipY + stopNoteheadEdgeY) / 2 * unitInPixels;
+            if (direction === 1) { // stems up: tips above the noteheads (lower y)
+                startCenterMinY = startTipY + totalStrokesHeight / 2; // group must not exceed the stem tip
+                startCenterMaxY = startNoteheadEdgeY - yPadding - totalStrokesHeight / 2; // group must keep its distance from the notehead
+                stopCenterMinY = stopTipY + totalStrokesHeight / 2;
+                stopCenterMaxY = stopNoteheadEdgeY - yPadding - totalStrokesHeight / 2;
+            } else { // stems down: tips below the noteheads
+                startCenterMinY = startNoteheadEdgeY + yPadding + totalStrokesHeight / 2;
+                startCenterMaxY = startTipY - totalStrokesHeight / 2;
+                stopCenterMinY = stopNoteheadEdgeY + yPadding + totalStrokesHeight / 2;
+                stopCenterMaxY = stopTipY - totalStrokesHeight / 2;
+            }
+        } else {
+            // stemless notes (e.g. whole notes) or opposite stem directions: anchor the strokes between the noteheads
+            const startBoundingBox: VF.BoundingBox = vfStartNote.getBoundingBox();
+            const stopBoundingBox: VF.BoundingBox = vfStopNote.getBoundingBox();
+            startXPx = startBoundingBox.getX() + startBoundingBox.getW();
+            stopXPx = stopBoundingBox.getX(); // starts at the leftmost modifier, so the strokes also avoid e.g. accidentals
+            const startNoteheadBounds: {y_top: number, y_bottom: number} = (vfStartNote as any).getNoteHeadBounds();
+            const stopNoteheadBounds: {y_top: number, y_bottom: number} = (vfStopNote as any).getNoteHeadBounds();
+            startYPx = (startNoteheadBounds.y_top + startNoteheadBounds.y_bottom) / 2;
+            stopYPx = (stopNoteheadBounds.y_top + stopNoteheadBounds.y_bottom) / 2;
+        }
+
+        // horizontal start/end of the strokes (in units), centered between the stems (or noteheads):
+        const leftX: number = startXPx / unitInPixels;
+        const rightX: number = stopXPx / unitInPixels;
+        const availableSpace: number = rightX - leftX;
+        let strokeLength: number = Math.min(
+            availableSpace - 2 * this.rules.TremoloBetweenNotesXPadding,
+            availableSpace * this.rules.TremoloBetweenNotesMaxLengthFactor);
+        const minimumStrokeLength: number = 1.0;
+        strokeLength = Math.max(strokeLength, Math.min(minimumStrokeLength, availableSpace - 0.2)); // tight layout: allow less padding
+        if (strokeLength < 0.5) {
+            log.debug("VexFlowMusicSheetDrawer.drawTremoloBetweenTwoNotes: not enough horizontal space to draw tremolo strokes.");
+            return strokeId;
+        }
+        const xCenter: number = (leftX + rightX) / 2;
+        const startX: number = xCenter - strokeLength / 2;
+        const stopX: number = xCenter + strokeLength / 2;
+
+        // vertical center of the strokes at start and stop (in units), with the slant (vertical rise/fall) limited:
+        const yMiddle: number = (startYPx + stopYPx) / 2 / unitInPixels;
+        let slant: number = (stopYPx - startYPx) / unitInPixels;
+        const maxSlant: number = this.rules.TremoloBetweenNotesMaxSlant;
+        if (Math.abs(slant) > maxSlant) {
+            slant = Math.sign(slant) * maxSlant;
+        }
+        let startY: number = yMiddle - slant / 2;
+        let stopY: number = yMiddle + slant / 2;
+
+        // shift the stroke group vertically if necessary to keep it within the allowed range at both notes,
+        //   e.g. when the slant was limited above (for notes far apart),
+        //   which moves the group out of the middle of the stems' free regions:
+        const minimumYShift: number = Math.max(startCenterMinY - startY, stopCenterMinY - stopY);
+        const maximumYShift: number = Math.min(startCenterMaxY - startY, stopCenterMaxY - stopY);
+        let yShift: number = 0;
+        if (minimumYShift <= maximumYShift) {
+            yShift = Math.min(Math.max(0, minimumYShift), maximumYShift); // smallest shift that satisfies both ranges
+        } else {
+            yShift = (minimumYShift + maximumYShift) / 2; // both ranges can't be satisfied (e.g. very short stems): balance the violations
+        }
+        startY += yShift;
+        stopY += yShift;
+
+        // draw the strokes as parallelograms (like beams), stacked vertically around the center line:
+        const color: string = this.rules.DefaultColorMusic;
+        for (let strokeIndex: number = 0; strokeIndex < tremolo.strokes; strokeIndex++) {
+            const strokeStartTopY: number = startY - totalStrokesHeight / 2 + strokeIndex * strokePeriod;
+            const strokeStopTopY: number = stopY - totalStrokesHeight / 2 + strokeIndex * strokePeriod;
+            const strokePoints: PointF2D[] = [
+                new PointF2D(startX, strokeStartTopY),
+                new PointF2D(stopX, strokeStopTopY),
+                new PointF2D(stopX, strokeStopTopY + strokeThickness),
+                new PointF2D(startX, strokeStartTopY + strokeThickness),
+                new PointF2D(startX, strokeStartTopY)
+            ];
+            const node: Node = this.DrawPath(strokePoints, stopGNote.ParentMusicPage, true, undefined, color);
+            this.setSVGId(node, this.getMeasureElementSVGId("trem", measure, strokeId));
+            this.addSVGClass(node, "osmd-tremolo");
+            strokeId++;
+        }
+
+        // update SkyLine/BottomLine with the outer edges of the strokes
+        //   (calculated geometrically, much cheaper than re-doing the pixel-based skyline calculation):
+        const skyBottomLineCalculator: SkyBottomLineCalculator = staffLine.SkyBottomLineCalculator;
+        const staffLineAbsolute: PointF2D = staffLine.PositionAndShape.AbsolutePosition;
+        skyBottomLineCalculator.mergeSkyLineWithLine(
+            new PointF2D(startX - staffLineAbsolute.x, startY - totalStrokesHeight / 2 - staffLineAbsolute.y),
+            new PointF2D(stopX - staffLineAbsolute.x, stopY - totalStrokesHeight / 2 - staffLineAbsolute.y));
+        skyBottomLineCalculator.mergeBottomLineWithLine(
+            new PointF2D(startX - staffLineAbsolute.x, startY + totalStrokesHeight / 2 - staffLineAbsolute.y),
+            new PointF2D(stopX - staffLineAbsolute.x, stopY + totalStrokesHeight / 2 - staffLineAbsolute.y));
+        return strokeId;
+    }
+
+    /**
+     * Gets the id of an SVG element that is drawn for a measure, but outside the measure's group (see
+     * GraphicalMeasure.getSVGGElement()), unique in the sheet's drawing: "osmd-", the kind of element, the measure's index in
+     * Sheet.SourceMeasures, "-", its staff's index in Sheet.Staves and "-" the element's number among those of its kind in the
+     * measure, all counted from 0, the indices as in the measure's own id (see GraphicalMeasure.getSVGGElementId()):
+     * "osmd-trem11-1-0" is the first tremolo stroke drawn with the 12th measure of the second staff.
+     * @param kind "trem" for the strokes of a tremolo between two notes (drawn with the measure of the second note), "buzz" for
+     *   a buzz roll
+     * @param measure the measure the element is drawn with
+     * @param numberInMeasure the element's number among those of its kind in the measure, from 0, in the order they are drawn
+     */
+    protected getMeasureElementSVGId(kind: string, measure: GraphicalMeasure, numberInMeasure: number): string {
+        return `osmd-${kind}${measure.parentSourceMeasure?.measureListIndex}-${measure.ParentStaff.idInMusicSheet}-${numberInMeasure}`;
+    }
+
+    /**
+     * Sets the id of the SVG group a drawn element was drawn into, e.g. "osmd-trem11-1-0" for a tremolo stroke drawn with
+     * DrawPath(), which would add VexFlow's prefix (vf-) to an id given to it.
+     * @param node the group, undefined if nothing was drawn, e.g. with the canvas backend
+     * @param id the id, unique in the sheet's drawing
+     */
+    protected setSVGId(node: Node, id: string): void {
+        (node as SVGGElement)?.setAttribute?.("id", id);
     }
 
     // private drawPixel(coord: PointF2D): void {
@@ -339,7 +669,7 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
     }
 
     public DrawPath(inputPoints: PointF2D[], musicPage: GraphicalMusicPage,
-        fill: boolean = true, id?: string): Node {
+        fill: boolean = true, id?: string, color?: string): Node {
         const musicPageIndex: number = musicPage.PageNumber - 1;
         const backendToUse: VexFlowBackend = this.backends[musicPageIndex];
 
@@ -347,7 +677,7 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         for (const inputPoint of inputPoints) {
             transformedPoints.push(this.applyScreenTransformation(inputPoint));
         }
-        return backendToUse.renderPath(transformedPoints, fill, id);
+        return backendToUse.renderPath(transformedPoints, fill, id, color);
     }
 
     protected drawSkyLine(staffline: StaffLine): void {
@@ -461,26 +791,56 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
     }
 
     protected drawInstrumentBrace(brace: GraphicalObject, system: MusicSystem): void {
+        if (!this.lazyDrawsLeftEdgeOnce()) {
+            return; // lazy horizontal: the brace is a once-only left-edge element, drawn with the first batch
+        }
+        const ctx: Vex.IRenderContext = this.backend.getContext();
+        ctx.openGroup("brace");
         // Draw InstrumentBrackets at beginning of line
         const vexBrace: VexFlowInstrumentBrace = (brace as VexFlowInstrumentBrace);
-        vexBrace.draw(this.backend.getContext());
+        vexBrace.draw(ctx);
+        ctx.closeGroup();
     }
 
     protected drawGroupBracket(bracket: GraphicalObject, system: MusicSystem): void {
+        if (!this.lazyDrawsLeftEdgeOnce()) {
+            return; // lazy horizontal: the group bracket is a once-only left-edge element (first batch only)
+        }
+        const ctx: Vex.IRenderContext = this.backend.getContext();
+        ctx.openGroup("bracket");
         // Draw InstrumentBrackets at beginning of line
         const vexBrace: VexFlowInstrumentBracket = (bracket as VexFlowInstrumentBracket);
-        vexBrace.draw(this.backend.getContext());
+        vexBrace.draw(ctx);
+        ctx.closeGroup();
+    }
+
+    /** Lazy horizontal rendering: whether a spanning element (octave shift, pedal, vibrato, hairpin) belongs
+     *  in this batch's draw x-window. It is drawn in the batch where its END MEASURE's right edge first enters
+     *  the frontier -- i.e. once its whole span is laid out and stable (same rule as the measure itself).
+     *  Returns true when not lazy-horizontal, or when the end measure is unknown (don't suppress). */
+    private lazyDrawsSpanToMeasure(endMeasure: GraphicalMeasure): boolean {
+        if (this.LazyDrawFromXUnits === Number.NEGATIVE_INFINITY && this.LazyDrawToXUnits === Number.POSITIVE_INFINITY) {
+            return true;
+        }
+        if (!endMeasure) {
+            return true; // can't determine the span's end; don't suppress it
+        }
+        return this.lazyDrawsObject(endMeasure.PositionAndShape);
     }
 
     protected drawOctaveShifts(staffLine: StaffLine): void {
         for (const graphicalOctaveShift of staffLine.OctaveShifts) {
             if (graphicalOctaveShift) {
+                if (!this.lazyDrawsSpanToMeasure(graphicalOctaveShift.endMeasure)) {
+                    continue; // lazy horizontal: span not yet fully in the frontier
+                }
                 const vexFlowOctaveShift: VexFlowOctaveShift = graphicalOctaveShift as VexFlowOctaveShift;
                 const ctx: Vex.IRenderContext = this.backend.getContext();
                 const textBracket: VF.TextBracket = vexFlowOctaveShift.getTextBracket();
                 if (this.rules.DefaultColorMusic) {
                     (textBracket as any).render_options.color = this.rules.DefaultColorMusic;
                 }
+                VexFlowConverter.setVexFlowTextFontFamily((textBracket as any).font, this.rules);
                 textBracket.setContext(ctx);
                 try {
                     textBracket.draw();
@@ -495,6 +855,14 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         for (const graphicalPedal of staffLine.Pedals) {
             if (graphicalPedal) {
                 const vexFlowPedal: VexFlowPedal = graphicalPedal as VexFlowPedal;
+                // the pedal's part on this staffline ends in its end measure, or at the end of the staffline if it goes on
+                //   in a later system (the end measure of a part before is the pedal's own, in that system)
+                const endMeasure: GraphicalMeasure = vexFlowPedal.endMeasure;
+                const endMeasureOnStaffLine: GraphicalMeasure = !endMeasure || endMeasure.ParentStaffLine === staffLine
+                    ? endMeasure : staffLine.Measures.last();
+                if (!this.lazyDrawsSpanToMeasure(endMeasureOnStaffLine)) {
+                    continue; // lazy horizontal: span not yet fully in the frontier
+                }
                 const ctx: Vex.IRenderContext = this.backend.getContext();
                 const pedalMarking: Vex.Flow.PedalMarking = vexFlowPedal.getPedalMarking();
                 (pedalMarking as any).render_options.color = this.rules.DefaultColorMusic;
@@ -504,14 +872,35 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         }
     }
 
+    protected drawWavyLines(staffLine: StaffLine): void {
+        for (const graphicalWavyLine of staffLine.WavyLines) {
+            if (graphicalWavyLine) {
+                const vexFlowVibratoBracket: VexFlowVibratoBracket = graphicalWavyLine as VexFlowVibratoBracket;
+                const wavyEndMeasure: GraphicalMeasure = vexFlowVibratoBracket.endVfVoiceEntry?.parentStaffEntry?.parentMeasure;
+                if (!this.lazyDrawsSpanToMeasure(wavyEndMeasure)) {
+                    continue; // lazy horizontal: span not yet fully in the frontier
+                }
+                const ctx: Vex.IRenderContext = this.backend.getContext();
+                const vfVibratoBracket: Vex.Flow.VibratoBracket = vexFlowVibratoBracket.getVibratoBracket();
+                (vfVibratoBracket as any).setContext(ctx);
+                vfVibratoBracket.draw();
+            }
+        }
+    }
+
     protected drawExpressions(staffline: StaffLine): void {
         // Draw all Expressions
         for (const abstractGraphicalExpression of staffline.AbstractExpressions) {
-            // Draw InstantaniousDynamics
+            // Draw InstantaneousDynamics
             if (abstractGraphicalExpression instanceof GraphicalInstantaneousDynamicExpression) {
                 this.drawInstantaneousDynamic((abstractGraphicalExpression as VexFlowInstantaneousDynamicExpression));
-                // Draw InstantaniousTempo
+                // Draw InstantaneousTempo
             } else if (abstractGraphicalExpression instanceof GraphicalInstantaneousTempoExpression) {
+                if (abstractGraphicalExpression.SourceExpression.parentMeasure?.MeasureNumber <= 1 &&
+                    !this.rules.RenderFirstTempoExpression
+                ) {
+                    continue;
+                }
                 const label: GraphicalLabel = (abstractGraphicalExpression as GraphicalInstantaneousTempoExpression).GraphicalLabel;
                 label.SVGNode = this.drawLabel(label, GraphicalLayers.Notes);
                 // Draw ContinuousDynamics
@@ -542,15 +931,19 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
     protected drawContinuousDynamic(graphicalExpression: VexFlowContinuousDynamicExpression): void {
         if (graphicalExpression.IsVerbal) {
             const label: GraphicalLabel = graphicalExpression.Label;
-            label.SVGNode = this.drawLabel(label, <number>GraphicalLayers.Notes);
+            label.SVGNode = this.drawLabel(label, <number>GraphicalLayers.Notes); // x-window gated inside drawLabel
         } else {
+            if (!this.lazyDrawsSpanToMeasure(graphicalExpression.EndMeasure)) {
+                return; // lazy horizontal: hairpin not yet fully in the frontier
+            }
             for (const line of graphicalExpression.Lines) {
                 const start: PointF2D = new PointF2D(graphicalExpression.ParentStaffLine.PositionAndShape.AbsolutePosition.x + line.Start.x,
                                                      graphicalExpression.ParentStaffLine.PositionAndShape.AbsolutePosition.y + line.Start.y);
                 const end: PointF2D = new PointF2D(graphicalExpression.ParentStaffLine.PositionAndShape.AbsolutePosition.x + line.End.x,
                                                    graphicalExpression.ParentStaffLine.PositionAndShape.AbsolutePosition.y + line.End.y);
-                this.drawLine(start, end, line.colorHex ?? "#000000", line.Width);
+                line.SVGElement = this.drawLine(start, end, line.colorHex ?? "#000000", line.Width);
                 // the null check for colorHex is not strictly necessary anymore, but the previous default color was red.
+                this.addSVGClass(line.SVGElement, "osmd-wedge");
             }
         }
     }
@@ -574,6 +967,9 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
         let color: string;
         if (this.rules.ColoringEnabled) {
             color = graphicalLabel.Label.colorDefault;
+            if (graphicalLabel.ColorXML) {
+                color = graphicalLabel.ColorXML;
+            }
             if (!color) {
                 color = this.rules.DefaultColorLabel;
             }
@@ -591,8 +987,8 @@ export class VexFlowMusicSheetDrawer extends MusicSheetDrawer {
             const currLine: {text: string, xOffset: number, width: number} = graphicalLabel.TextLines[i];
             const xOffsetInPixel: number = this.calculatePixelDistance(currLine.xOffset);
             const linePosition: PointF2D = new PointF2D(screenPosition.x + xOffsetInPixel, screenPosition.y);
-            const newNode: Node =
-                this.backend.renderText(height, fontStyle, font, currLine.text, fontHeightInPixel, linePosition, color, graphicalLabel.Label.fontFamily);
+            const newNode: Node = this.backend.renderText(height, fontStyle, font, currLine.text, fontHeightInPixel, linePosition, color,
+                                                          graphicalLabel.Label.fontFamily, graphicalLabel.Label.language);
             if (!node) {
                 node = newNode;
             } else {

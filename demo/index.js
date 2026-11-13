@@ -173,6 +173,7 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         zoomOuts.push(document.getElementById("zoom-out-btn"));
         zoomOuts.push(document.getElementById("zoom-out-btn-optional"));
         canvas = document.createElement("div");
+        canvas.id = "scoreDiv";
         if (horizontalScrolling) {
             canvas.style.overflowX = 'auto'; // enable horizontal scrolling
         }
@@ -318,7 +319,7 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         //openSheetMusicDisplay.DrawBottomLine = true;
         //openSheetMusicDisplay.setDrawBoundingBox("GraphicalLabel", false);
         openSheetMusicDisplay.setLogLevel('info'); // set this to 'debug' if you want to see more detailed control flow information in console
-        document.body.appendChild(canvas);
+        (document.getElementById("scoreShell") || document.body).appendChild(canvas);
 
         window.addEventListener("keydown", function (e) {
             var event = window.event ? window.event : e;
@@ -345,12 +346,12 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
                 openSheetMusicDisplay.FollowCursor = !openSheetMusicDisplay.FollowCursor;
             }
         }
-        hideCursorBtn.style.display = 'none'
+        hideCursorBtn.classList.add("hidden");
         hideCursorBtn.addEventListener("click", function () {
             if (openSheetMusicDisplay.cursor) {
                 openSheetMusicDisplay.cursor.hide();
-                hideCursorBtn.style.display = 'none'
-                showCursorBtn.style.display = 'block'
+                hideCursorBtn.classList.add("hidden");
+                showCursorBtn.classList.remove("hidden");
             } else {
                 console.info("Can't hide cursor, as it was disabled (e.g. by drawingParameters).");
             }
@@ -358,8 +359,8 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
         showCursorBtn.addEventListener("click", function () {
             if (openSheetMusicDisplay.cursor) {
                 openSheetMusicDisplay.cursor.show();
-                hideCursorBtn.style.display = 'block'
-                showCursorBtn.style.display = 'none'
+                hideCursorBtn.classList.remove("hidden");
+                showCursorBtn.classList.add("hidden");
             } else {
                 console.info("Can't show cursor, as it was disabled (e.g. by drawingParameters).");
             }
@@ -646,12 +647,12 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
 
     // Enable/Disable Controls
     function disable() {
-        document.body.style.opacity = 0.3;
+        document.body.classList.add("is-loading");
         setDisabledForControls("disabled");
     }
 
     function enable() {
-        document.body.style.opacity = 1;
+        document.body.classList.remove("is-loading");
         setDisabledForControls("");
         logCanvasSize();
     }
@@ -737,5 +738,6 @@ import { TransposeCalculator } from '../src/Plugins/Transpose/TransposeCalculato
     showTiming.onclick = function () {
         isShowTime = !isShowTime
         timingWrapper.style.display = isShowTime ? '' : 'none'
+        showTiming.classList.toggle('is-active', isShowTime)
     }
 }());

@@ -1,5 +1,5 @@
 import {Fraction} from "../../Common/DataObjects/Fraction";
-import {Repetition} from "../MusicSource/Repetition";
+import {Repetition, RepetitionEndingPart} from "../MusicSource/Repetition";
 import {DynamicsContainer} from "../VoiceData/HelperObjects/DynamicsContainer";
 import {MappingSourceMusicPart} from "../MusicSource/MappingSourceMusicPart";
 import {SourceMeasure} from "../VoiceData/SourceMeasure";
@@ -8,30 +8,41 @@ import {Instrument} from "../Instrument";
 import {VerticalSourceStaffEntryContainer} from "../VoiceData/VerticalSourceStaffEntryContainer";
 import {RhythmInstruction} from "../VoiceData/Instructions/RhythmInstruction";
 import {AbstractNotationInstruction} from "../VoiceData/Instructions/AbstractNotationInstruction";
-import {RepetitionInstruction} from "../VoiceData/Instructions/RepetitionInstruction";
+import {AlignmentType, RepetitionInstruction, RepetitionInstructionEnum} from "../VoiceData/Instructions/RepetitionInstruction";
 import {ContinuousDynamicExpression} from "../VoiceData/Expressions/ContinuousExpressions/ContinuousDynamicExpression";
 import {InstantaneousDynamicExpression} from "../VoiceData/Expressions/InstantaneousDynamicExpression";
 import {MultiTempoExpression} from "../VoiceData/Expressions/MultiTempoExpression";
 import {AbstractExpression} from "../VoiceData/Expressions/AbstractExpression";
 import log from "loglevel";
-import { MusicSheet } from "../MusicSheet";
+import {MusicSheet} from "../MusicSheet";
+import {NoteHeadShape} from "../VoiceData/Notehead";
+import {PlaybackSettings} from "../../Common/DataObjects/PlaybackSettings";
+import {Note} from "../VoiceData/Note";
 
 export class MusicPartManagerIterator {
     constructor(musicSheet: MusicSheet, startTimestamp?: Fraction, endTimestamp?: Fraction) {
         try {
             this.frontReached = true;
             this.musicSheet = musicSheet;
+            this.currentBpm = musicSheet.userStartTempoInBPM;
             this.currentVoiceEntries = undefined;
             this.frontReached = false;
             for (const rep of this.musicSheet.Repetitions) {
                 this.setRepetitionIterationCount(rep, 1);
             }
-            this.activeDynamicExpressions = new Array(this.musicSheet.getCompleteNumberOfStaves());
+            for (let i: number = 0; i < musicSheet.getCompleteNumberOfStaves(); i++) {
+                this.ActiveDynamicExpressions.push(undefined);
+            }
+
             this.currentMeasure = this.musicSheet.SourceMeasures[0];
-            if (!startTimestamp) { return; }
+            if (!startTimestamp) {
+                startTimestamp = new Fraction();
+            }
+
             do {
                 this.moveToNext();
             } while ((!this.currentVoiceEntries || this.currentTimeStamp.lt(startTimestamp)) && !this.endReached);
+            this.currentDynamicChangingExpressions.length = 0;
             for (let staffIndex: number = 0; staffIndex < this.activeDynamicExpressions.length; staffIndex++) {
                 if (this.activeDynamicExpressions[staffIndex]) {
                     if (this.activeDynamicExpressions[staffIndex] instanceof ContinuousDynamicExpression) {
@@ -65,8 +76,8 @@ export class MusicPartManagerIterator {
     private currentDynamicChangingExpressions: DynamicsContainer[] = [];
     private currentTempoChangingExpression: MultiTempoExpression;
     // FIXME: replace these two with a real Dictionary!
-    private repetitionIterationCountDictKeys: Repetition[];
-    private repetitionIterationCountDictValues: number[];
+    private repetitionIterationCountDictKeys: Repetition[] = [];
+    private repetitionIterationCountDictValues: number[] = [];
     private currentRepetition: Repetition = undefined;
     private endReached: boolean = false;
     private frontReached: boolean = false;
@@ -75,6 +86,10 @@ export class MusicPartManagerIterator {
     private currentRelativeInMeasureTimestamp: Fraction = new Fraction(0, 1);
     private currentVerticalContainerInMeasureTimestamp: Fraction = new Fraction(0, 1);
     private jumpResponsibleRepetition: Repetition = undefined;
+    /** The D.C. or D.S. repetition whose measures are played again after its jump back,
+     *  until it jumps forward (to its coda, its last ending or the end) or its measures are passed.
+     *  Repeats are not taken again in these measures. */
+    private replayedRepetitionFromWords: Repetition = undefined;
     private currentBpm: number;
     private activeDynamicExpressions: AbstractExpression[] = [];
     private activeTempoExpression: MultiTempoExpression;
@@ -104,8 +119,14 @@ export class MusicPartManagerIterator {
         }
         return 0;
     }
+    /** The tempo at the current position in quarter notes per minute: a `<sound tempo>`, or else the tempo instruction's,
+     *  e.g. 60 for a metronome mark half = 30 (see InstantaneousTempoExpression.TempoInQuarterNotesPerMinute).
+     */
     public get CurrentBpm(): number {
         return this.currentBpm;
+    }
+    public set CurrentBpm(value: number) {
+        this.currentBpm = value;
     }
     public get CurrentVoiceEntries(): VoiceEntry[] {
         return this.currentVoiceEntries;
@@ -146,7 +167,8 @@ export class MusicPartManagerIterator {
         ret.currentVoiceEntryIndex = this.currentVoiceEntryIndex;
         ret.currentMappingPart = this.currentMappingPart;
         ret.currentPartIndex = this.currentPartIndex;
-        ret.currentVoiceEntries = this.currentVoiceEntries;
+        ret.currentVoiceEntries = this.currentVoiceEntries?.slice() ?? undefined;
+        // without slice() this is a shallow copy that shares data with the cloned iterator, so one can overwrite the other e.g. on next(). see #1674
         ret.endReached = this.endReached;
         ret.frontReached = this.frontReached;
         // alternative method to set currentTimeStamp? may not fully affect current iterator position
@@ -168,37 +190,35 @@ export class MusicPartManagerIterator {
             for (const entry of this.currentVoiceEntries) {
                 if (entry.ParentVoice.Parent.IdString === instrument.IdString) {
                     this.getVisibleEntries(entry, voiceEntries);
-                    return voiceEntries;
                 }
             }
-        } else {
-            for (const entry of this.currentVoiceEntries) {
-                this.getVisibleEntries(entry, voiceEntries);
-            }
+            return voiceEntries;
+        }
+        for (const entry of this.currentVoiceEntries) {
+            this.getVisibleEntries(entry, voiceEntries);
         }
         return voiceEntries;
     }
 
     /**
-     * Returns the visible voice entries for the provided instrument of the current iterator position.
+     * Returns the audible voice entries for the provided instrument of the current iterator position.
      * @param instrument
      * Returns: A List of voiceEntries. If there are no entries the List has a Count of 0 (it does not return null).
      */
     public CurrentAudibleVoiceEntries(instrument?: Instrument): VoiceEntry[] {
         const voiceEntries: VoiceEntry[] = [];
-        if (!this.currentVoiceEntries) {
-            return voiceEntries;
-        }
-        if (instrument) {
-            for (const entry of this.currentVoiceEntries) {
-                if (entry.ParentVoice.Parent.IdString === instrument.IdString) {
-                    this.getAudibleEntries(entry, voiceEntries);
-                    return voiceEntries;
+        if (this.currentVoiceEntries) {
+            if (instrument) {
+                for (const entry of this.currentVoiceEntries) {
+                    if (entry.ParentVoice.Parent.IdString === instrument.IdString) {
+                        this.getAudibleEntries(entry, voiceEntries);
+                        return voiceEntries;
+                    }
                 }
-            }
-        } else {
-            for (const entry of this.currentVoiceEntries) {
-                this.getAudibleEntries(entry, voiceEntries);
+            } else {
+                for (const entry of this.currentVoiceEntries) {
+                    this.getAudibleEntries(entry, voiceEntries);
+                }
             }
         }
         return voiceEntries;
@@ -237,10 +257,9 @@ export class MusicPartManagerIterator {
         }
         return voiceEntries;
     }
-
-    //public currentPlaybackSettings(): PlaybackSettings {
-    //    return this.manager.MusicSheet.SheetPlaybackSetting;
-    //}
+    public currentPlaybackSettings(): PlaybackSettings {
+       return this.musicSheet.SheetPlaybackSetting;
+    }
 
     // move to previous
     public moveToPrevious(): void {
@@ -252,6 +271,7 @@ export class MusicPartManagerIterator {
             this.currentVoiceEntries = [];
         }
         this.recursiveMoveBack();
+        this.updateCurrentBpm();
     }
 
     public moveToPreviousVisibleVoiceEntry(notesOnly: boolean): void {
@@ -262,6 +282,7 @@ export class MusicPartManagerIterator {
             }
         }
     }
+
     public moveToNext(): void {
         this.forwardJumpOccurred = this.backJumpOccurred = false;
         if (this.endReached) { return; }
@@ -270,12 +291,34 @@ export class MusicPartManagerIterator {
             this.currentVoiceEntryIndex = -1;
         }
         if (this.currentVoiceEntries) {
-            this.currentVoiceEntries = [];
+            this.currentVoiceEntries.length = 0;
         }
         this.recursiveMove();
         if (!this.currentMeasure) {
             this.currentTimeStamp = new Fraction(99999, 1);
             this.currentMeasure = this.musicSheet.SourceMeasures.last();
+        }
+
+        this.updateCurrentBpm();
+    }
+
+    private updateCurrentBpm(): void {
+        if (this.musicSheet.IgnoreTempoInstructions) {
+            return;
+        }
+        const expression: MultiTempoExpression = this.CurrentTempoChangingExpression;
+        if (!expression) {
+            this.currentBpm = this.musicSheet.userStartTempoInBPM;
+        } else if (expression.ContinuousTempo !== undefined && this.currentMeasure.Rules.UseInterpolatedTempoForAccelerandoEtc) {
+            const interpolatedBpm: number = expression.ContinuousTempo.getInterpolatedTempo(this.CurrentSourceTimestamp);
+            if (interpolatedBpm > 0) {
+                this.currentBpm = interpolatedBpm;
+            }
+        } else if (expression.PlaybackTempoInBpm || expression.InstantaneousTempo?.TempoInBpm) {
+            this.currentBpm = expression.PlaybackTempoInBpm ?? expression.InstantaneousTempo.TempoInQuarterNotesPerMinute;
+        } else if (expression.ContinuousTempo?.StartTempo > 0) {
+            // Without interpolation, restore the baseline instead of retaining the BPM from a later position.
+            this.currentBpm = expression.ContinuousTempo.StartTempo;
         }
     }
     public moveToNextVisibleVoiceEntry(notesOnly: boolean): void {
@@ -368,9 +411,21 @@ export class MusicPartManagerIterator {
                   currentRepetition.StartIndex >= this.JumpResponsibleRepetition.StartIndex &&
                   currentRepetition.EndIndex <= this.JumpResponsibleRepetition.EndIndex
                 ) {
-                    this.resetRepetitionIterationCount(currentRepetition);
+                    this.restartNestedRepetition(currentRepetition);
                 }
             }
+        }
+    }
+
+    /**
+     * Starts a repetition again that lies within the repetition that jumped last: it is played with all its passes again.
+     * After a D.C. or D.S., repeats are not taken again: it is played once, as its last pass (with its last ending).
+     */
+    private restartNestedRepetition(repetition: Repetition): void {
+        if (this.replayedRepetitionFromWords) {
+            this.setRepetitionIterationCount(repetition, repetition.UserNumberOfRepetitions);
+        } else {
+            this.resetRepetitionIterationCount(repetition);
         }
     }
 
@@ -380,9 +435,9 @@ export class MusicPartManagerIterator {
             const currentRepetition: Repetition = repetitionInstruction.parentRepetition;
             if (!currentRepetition) { continue; }
             if (currentRepetition.BackwardJumpInstructions.indexOf(repetitionInstruction) > -1) {
-                if (this.getRepetitionIterationCount(currentRepetition) < currentRepetition.UserNumberOfRepetitions) {
+                if (this.getRepetitionIterationCount(currentRepetition) < currentRepetition.UserNumberOfRepetitions &&
+                    !currentRepetition.SkipRepetition && !this.musicSheet.Rules.CursorIgnoreRepetitions) {
                     this.doBackJump(currentRepetition);
-                    this.backJumpOccurred = true;
                     return;
                 }
             }
@@ -391,38 +446,98 @@ export class MusicPartManagerIterator {
                   this.JumpResponsibleRepetition !== undefined
                   && currentRepetition !== this.JumpResponsibleRepetition
                   && currentRepetition.StartIndex >= this.JumpResponsibleRepetition.StartIndex
-                  && currentRepetition.EndIndex <= this.JumpResponsibleRepetition.EndIndex
-                ) {
-                    this.resetRepetitionIterationCount(currentRepetition);
+                  && currentRepetition.EndIndex <= this.JumpResponsibleRepetition.EndIndex) {
+                    this.restartNestedRepetition(currentRepetition);
                 }
 
-                const forwardJumpTargetMeasureIndex: number = currentRepetition.getForwardJumpTargetForIteration(
-                  this.getRepetitionIterationCount(currentRepetition)
-                );
-                if (forwardJumpTargetMeasureIndex >= 0) {
-                    this.currentMeasureIndex = forwardJumpTargetMeasureIndex;
-                    this.currentMeasure = this.musicSheet.SourceMeasures[this.currentMeasureIndex];
-                    this.currentVoiceEntryIndex = -1;
-                    this.jumpResponsibleRepetition = currentRepetition;
-                    this.forwardJumpOccurred = true;
-                    return;
-                }
-                if (forwardJumpTargetMeasureIndex === -2) {
-                    this.endReached = true;
+                if (this.repetitionIterationCountDictKeys.contains(currentRepetition)) {
+                    const forwardJumpTargetMeasureIndex: number = currentRepetition.getForwardJumpTargetForIteration(
+                        this.getRepetitionIterationCount(currentRepetition));
+
+                    // The ending or coda to jump to lies after this measure. A target at or before it (e.g. from a "2." bracket
+                    //   placed before the "1." bracket) would be jumped to on every pass, endlessly: then the measures just go on.
+                    if (forwardJumpTargetMeasureIndex > this.currentMeasureIndex) {
+                        this.currentMeasureIndex = forwardJumpTargetMeasureIndex;
+                        this.currentMeasure = this.musicSheet.SourceMeasures[this.currentMeasureIndex];
+                        this.currentVoiceEntryIndex = -1;
+                        this.jumpResponsibleRepetition = currentRepetition;
+                        this.forwardJumpOccurred = true;
+                        if (currentRepetition === this.replayedRepetitionFromWords) {
+                            // the coda or the last ending is played for the first time
+                            this.replayedRepetitionFromWords = undefined;
+                        }
+                        return;
+                    }
+                    if (forwardJumpTargetMeasureIndex === -2) {
+                        // The piece ends at this Fine. As at the end of the last measure, the iterator still moves past this
+                        //   measure (no return here): Cursor.update() moves it back into this measure and forth again to draw
+                        //   the cursor at the end, and only passing the Fine again ends it again.
+                        this.endReached = true;
+                    }
                 }
             }
         }
         this.currentMeasureIndex++;
+        this.skipEndingsOfOtherPasses();
         if (this.JumpResponsibleRepetition !== undefined && this.currentMeasureIndex > this.JumpResponsibleRepetition.EndIndex) {
             this.jumpResponsibleRepetition = undefined;
         }
+        if (this.replayedRepetitionFromWords && this.currentMeasureIndex > this.replayedRepetitionFromWords.EndIndex) {
+            this.replayedRepetitionFromWords = undefined;
+        }
+    }
+
+    /**
+     * Moves past the endings starting at the current measure that are for other passes of their repeat on its last pass,
+     * e.g. past a second ending after the first ending "1, 3" on the third pass. (The passes before jump back at the end of
+     * their ending, and over the endings before theirs, see the repeat's forward jump in handleRepetitionsAtMeasureEnd().)
+     */
+    private skipEndingsOfOtherPasses(): void {
+        for (let skipped: {repetition: Repetition, ending: RepetitionEndingPart} = this.findEndingOfOtherPass(); skipped;
+             skipped = this.findEndingOfOtherPass()) {
+            this.currentMeasureIndex = skipped.ending.part.EndIndex + 1;
+            this.jumpResponsibleRepetition = skipped.repetition;
+            this.forwardJumpOccurred = true;
+        }
+    }
+
+    /** The ending starting at the current measure, with its repeat, if the repeat is on its last pass and that pass has another ending. */
+    private findEndingOfOtherPass(): {repetition: Repetition, ending: RepetitionEndingPart} {
+        if (this.musicSheet.Rules.CursorIgnoreRepetitions) {
+            return undefined;
+        }
+        for (const instruction of this.musicSheet.SourceMeasures[this.currentMeasureIndex]?.FirstRepetitionInstructions ?? []) {
+            const repetition: Repetition = instruction.parentRepetition;
+            // (only a repeat's: endings that the repetition of a D.C. or D.S. took, e.g. one with no forward repeat after its
+            //   segno, are played as they come)
+            if (instruction.type !== RepetitionInstructionEnum.Ending || instruction.alignment !== AlignmentType.Begin ||
+                !repetition || repetition.FromWords || repetition.SkipRepetition || !this.repetitionIterationCountDictKeys.contains(repetition)) {
+                continue;
+            }
+            const pass: number = this.getRepetitionIterationCount(repetition);
+            const ending: RepetitionEndingPart = repetition.EndingParts.find(
+                (part: RepetitionEndingPart): boolean => part.part.StartIndex === this.currentMeasureIndex);
+            const passEndingStartIndex: number = repetition.getForwardJumpTargetForIteration(pass);
+            if (pass >= repetition.UserNumberOfRepetitions && ending && passEndingStartIndex >= 0 &&
+                passEndingStartIndex !== this.currentMeasureIndex) {
+                return {repetition: repetition, ending: ending};
+            }
+        }
+        return undefined;
     }
     private doBackJump(currentRepetition: Repetition): void {
+        if (currentRepetition.SkipRepetition || this.musicSheet.Rules.CursorIgnoreRepetitions) {
+            return;
+        }
         this.currentMeasureIndex = currentRepetition.getBackwardJumpTarget();
         this.currentMeasure = this.musicSheet.SourceMeasures[this.currentMeasureIndex];
         this.currentVoiceEntryIndex = -1;
         this.incrementRepetitionIterationCount(currentRepetition);
         this.jumpResponsibleRepetition = currentRepetition;
+        this.backJumpOccurred = true;
+        if (currentRepetition.FromWords) { // D.C. or D.S.
+            this.replayedRepetitionFromWords = currentRepetition;
+        }
     }
     private activateCurrentRhythmInstructions(): void {
         if (
@@ -441,50 +556,39 @@ export class MusicPartManagerIterator {
     }
     private activateCurrentDynamicOrTempoInstructions(): void {
         const timeSortedDynamics: DynamicsContainer[] = this.musicSheet.TimestampSortedDynamicExpressionsList;
-        while (
-          this.currentDynamicEntryIndex > 0 && (
-            this.currentDynamicEntryIndex >= timeSortedDynamics.length ||
-            this.CurrentSourceTimestamp.lte(timeSortedDynamics[this.currentDynamicEntryIndex].parMultiExpression().AbsoluteTimestamp)
-          )
-        ) {
-            this.currentDynamicEntryIndex--;
+        // Rebuild all staves after a backward jump across a dynamic change.
+        if (this.currentDynamicEntryIndex > 0 &&
+            timeSortedDynamics[this.currentDynamicEntryIndex - 1].parMultiExpression().AbsolutePlaybackTimestamp.gt(this.CurrentSourceTimestamp)) {
+            this.currentDynamicEntryIndex = 0;
+            this.activeDynamicExpressions.fill(undefined);
         }
+        const changedStaves: Set<number> = new Set();
         while (
           this.currentDynamicEntryIndex < timeSortedDynamics.length &&
-          timeSortedDynamics[this.currentDynamicEntryIndex].parMultiExpression().AbsoluteTimestamp.lt(this.CurrentSourceTimestamp)
-        ) {
-            this.currentDynamicEntryIndex++;
-        }
-        while (
-          this.currentDynamicEntryIndex < timeSortedDynamics.length
-          && timeSortedDynamics[this.currentDynamicEntryIndex].parMultiExpression().AbsoluteTimestamp.Equals(this.CurrentSourceTimestamp)
+          timeSortedDynamics[this.currentDynamicEntryIndex].parMultiExpression().AbsolutePlaybackTimestamp.lte(this.CurrentSourceTimestamp)
         ) {
             const dynamicsContainer: DynamicsContainer = timeSortedDynamics[this.currentDynamicEntryIndex];
             const staffIndex: number = dynamicsContainer.staffNumber;
-            if (this.CurrentSourceTimestamp.Equals(dynamicsContainer.parMultiExpression().AbsoluteTimestamp)) {
-                if (dynamicsContainer.continuousDynamicExpression) {
-                    this.activeDynamicExpressions[staffIndex] = dynamicsContainer.continuousDynamicExpression;
-                } else if (dynamicsContainer.instantaneousDynamicExpression) {
-                    this.activeDynamicExpressions[staffIndex] = dynamicsContainer.instantaneousDynamicExpression;
-                }
-            }
+            this.activeDynamicExpressions[staffIndex] = dynamicsContainer.continuousDynamicExpression ??
+                dynamicsContainer.instantaneousDynamicExpression;
+            changedStaves.add(staffIndex);
             this.currentDynamicEntryIndex++;
         }
-        this.currentDynamicChangingExpressions = [];
+        this.currentDynamicChangingExpressions.length = 0;
         for (let staffIndex: number = 0; staffIndex < this.activeDynamicExpressions.length; staffIndex++) {
             if (this.activeDynamicExpressions[staffIndex]) {
                 let startTime: Fraction;
                 let endTime: Fraction;
                 if (this.activeDynamicExpressions[staffIndex] instanceof ContinuousDynamicExpression) {
                     const continuousDynamic: ContinuousDynamicExpression = <ContinuousDynamicExpression>this.activeDynamicExpressions[staffIndex];
-                    startTime = continuousDynamic.StartMultiExpression.AbsoluteTimestamp;
-                    endTime = continuousDynamic.EndMultiExpression.AbsoluteTimestamp;
-                    if (startTime.lte(this.CurrentSourceTimestamp) && this.CurrentSourceTimestamp.lte(endTime)) {
+                    startTime = continuousDynamic.StartMultiExpression.AbsolutePlaybackTimestamp;
+                    endTime = continuousDynamic.EndMultiExpression.AbsolutePlaybackTimestamp;
+                    if (this.CurrentSourceTimestamp.gte(startTime) && this.CurrentSourceTimestamp.lte(endTime)) {
                         this.currentDynamicChangingExpressions.push(new DynamicsContainer(continuousDynamic, staffIndex));
                     }
                 } else {
                     const instantaneousDynamic: InstantaneousDynamicExpression = <InstantaneousDynamicExpression>this.activeDynamicExpressions[staffIndex];
-                    if (this.CurrentSourceTimestamp.Equals(instantaneousDynamic.ParentMultiExpression.AbsoluteTimestamp)) {
+                    if (changedStaves.has(staffIndex)) {
                         this.currentDynamicChangingExpressions.push(new DynamicsContainer(instantaneousDynamic, staffIndex));
                     }
                 }
@@ -492,47 +596,63 @@ export class MusicPartManagerIterator {
         }
         const timeSortedTempoExpressions: MultiTempoExpression[] = this.musicSheet.TimestampSortedTempoExpressionsList;
 
-        while (this.currentTempoEntryIndex > 0 && (
-          this.currentTempoEntryIndex >= timeSortedTempoExpressions.length
-          || this.CurrentSourceTimestamp.lte(timeSortedTempoExpressions[this.currentTempoEntryIndex].AbsoluteTimestamp)
-        )) {
+        // Keep the index just after the last instruction at or before the source position.
+        // Recompute the active expression from that index so reverse traversal cannot retain a future tempo.
+        while (this.currentTempoEntryIndex > 0 &&
+            timeSortedTempoExpressions[this.currentTempoEntryIndex - 1].AbsolutePlaybackTimestamp.gt(this.CurrentSourceTimestamp)) {
             this.currentTempoEntryIndex--;
         }
 
         while (
           this.currentTempoEntryIndex < timeSortedTempoExpressions.length &&
-          timeSortedTempoExpressions[this.currentTempoEntryIndex].AbsoluteTimestamp.lt(this.CurrentSourceTimestamp)
+          timeSortedTempoExpressions[this.currentTempoEntryIndex].AbsolutePlaybackTimestamp.lte(this.CurrentSourceTimestamp)
         ) {
             this.currentTempoEntryIndex++;
         }
-
-        while (
-          this.currentTempoEntryIndex < timeSortedTempoExpressions.length
-          && timeSortedTempoExpressions[this.currentTempoEntryIndex].AbsoluteTimestamp.Equals(this.CurrentSourceTimestamp)
-        ) {
-            this.activeTempoExpression = timeSortedTempoExpressions[this.currentTempoEntryIndex];
-            this.currentTempoEntryIndex++;
-        }
-        this.currentTempoChangingExpression = undefined;
-        if (this.activeTempoExpression) {
-            let endTime: Fraction = this.activeTempoExpression.AbsoluteTimestamp;
-            if (this.activeTempoExpression.ContinuousTempo) {
-                endTime = this.activeTempoExpression.ContinuousTempo.AbsoluteEndTimestamp;
+        let activeIndex: number = this.currentTempoEntryIndex - 1;
+        // Explicit sound sets the baseline, but must not suppress a simultaneous continuous change when interpolation is enabled.
+        const activeTimestamp: Fraction = timeSortedTempoExpressions[activeIndex]?.AbsolutePlaybackTimestamp;
+        let soundIndex: number = -1;
+        let continuousIndex: number = -1;
+        for (let i: number = activeIndex; i >= 0 && timeSortedTempoExpressions[i].AbsolutePlaybackTimestamp.Equals(activeTimestamp); i--) {
+            const expression: MultiTempoExpression = timeSortedTempoExpressions[i];
+            if (soundIndex < 0 && expression.PlaybackTempoInBpm > 0) {
+                soundIndex = i;
             }
-            if (   this.activeTempoExpression.AbsoluteTimestamp.lte(this.CurrentSourceTimestamp)
-                || this.CurrentSourceTimestamp.lte(endTime)
-            ) {
-                this.currentTempoChangingExpression = this.activeTempoExpression;
+            if (continuousIndex < 0 && expression.ContinuousTempo) {
+                continuousIndex = i;
             }
         }
+        if (continuousIndex >= 0 && this.currentMeasure.Rules.UseInterpolatedTempoForAccelerandoEtc) {
+            activeIndex = continuousIndex;
+        } else if (soundIndex >= 0) {
+            activeIndex = soundIndex;
+        }
+        this.activeTempoExpression = timeSortedTempoExpressions[activeIndex];
+        this.currentTempoChangingExpression = this.activeTempoExpression;
     }
 
+    /**
+     * Moves back to the previous vertical container: the previous one in the current measure, the last one of the
+     * source-previous measure (repetitions are not unrolled backwards), or the front of the sheet.
+     * Keeps the enrolled timestamp consistent with the source position: the measure durations that recursiveMove()
+     * added to it when leaving a measure forward are subtracted again when moving back into that measure,
+     * so that moving back and forth across a measure boundary is neutral.
+     */
     private recursiveMoveBack(): void {
        if (this.currentVoiceEntryIndex > 0 ) {
+            if (this.currentVoiceEntryIndex === this.currentMeasure.VerticalSourceStaffEntryContainers.length) {
+                // coming back from the end of the sheet: recursiveMove() left the index behind the last container of the
+                //   last measure and had added the measure's duration to the enrolled timestamp when it left the measure,
+                //   which the positions inside the measure must not include.
+                //   (An end set by Sheet.SelectionEnd is reached at a container of the measure, without that addition.)
+                this.currentEnrolledMeasureTimestamp.Sub(this.currentMeasure.Duration);
+            }
             this.currentVoiceEntryIndex--;
             const currentContainer: VerticalSourceStaffEntryContainer = this.currentMeasure.VerticalSourceStaffEntryContainers[this.currentVoiceEntryIndex];
             this.currentVoiceEntries = this.getVoiceEntries(currentContainer);
             this.currentVerticalContainerInMeasureTimestamp = currentContainer.Timestamp;
+            this.currentRelativeInMeasureTimestamp = this.currentVerticalContainerInMeasureTimestamp;
             this.currentTimeStamp = Fraction.plus(this.currentMeasure.AbsoluteTimestamp, this.currentVerticalContainerInMeasureTimestamp);
             this.activateCurrentDynamicOrTempoInstructions();
             // re-check endReached
@@ -545,12 +665,15 @@ export class MusicPartManagerIterator {
         }
         else if (this.currentVoiceEntryIndex === 0  && this.currentMeasureIndex !== 0) {
             const m: SourceMeasure = this.musicSheet.SourceMeasures[this.currentMeasureIndex-1];
+            // moving back into the previous measure: undo what recursiveMove() added when it left that measure forward
+            this.currentEnrolledMeasureTimestamp.Sub(m.Duration);
             this.currentMeasureIndex--;
             this.currentMeasure = this.musicSheet.SourceMeasures[this.currentMeasureIndex];
             const currentContainer: VerticalSourceStaffEntryContainer = m.VerticalSourceStaffEntryContainers[m.VerticalSourceStaffEntryContainers.length-1];
             this.currentVoiceEntries = this.getVoiceEntries(currentContainer);
             this.currentVerticalContainerInMeasureTimestamp = currentContainer.Timestamp;
             this.currentVoiceEntryIndex = m.VerticalSourceStaffEntryContainers.length-1;
+            this.currentRelativeInMeasureTimestamp = this.currentVerticalContainerInMeasureTimestamp;
             this.currentTimeStamp = Fraction.plus(this.currentMeasure.AbsoluteTimestamp, currentContainer.Timestamp);
             this.activateCurrentDynamicOrTempoInstructions();
             // re-check endReached
@@ -576,6 +699,7 @@ export class MusicPartManagerIterator {
             const currentContainer: VerticalSourceStaffEntryContainer = this.currentMeasure.VerticalSourceStaffEntryContainers[this.currentVoiceEntryIndex];
             this.currentVoiceEntries = this.getVoiceEntries(currentContainer);
             this.currentVerticalContainerInMeasureTimestamp = currentContainer.Timestamp;
+            this.currentRelativeInMeasureTimestamp = this.currentVerticalContainerInMeasureTimestamp;
             this.currentTimeStamp = Fraction.plus(this.currentMeasure.AbsoluteTimestamp, this.currentVerticalContainerInMeasureTimestamp);
             const selectionEnd: Fraction = this.musicSheet.SelectionEnd;
             // TODO handle selectionEnd undefined, can happen in Beethoven Ferne Geliebte
@@ -621,7 +745,7 @@ export class MusicPartManagerIterator {
         if (entry.ParentVoice.Visible) {
             let anyNoteVisible: boolean = false;
             for (const note of entry.Notes) {
-                if (note.PrintObject) {
+                if (note.isVisible() && note.Notehead?.Shape !== NoteHeadShape.NONE) {
                     anyNoteVisible = true;
                     break;
                 }
@@ -633,7 +757,20 @@ export class MusicPartManagerIterator {
         }
     }
     private getAudibleEntries(entry: VoiceEntry, audibleEntries: VoiceEntry[]): void {
-        if (entry.ParentVoice.Audible) {
+        // is it a tied note?
+        if (entry.hasTie()) {
+            // ignore all tied notes that are no start notes:
+            // check on the first note:
+            const note: Note = entry.Notes[0];
+            if (note.NoteTie !== undefined &&
+                note.NoteTie.StartNote !== note) {
+                // ignore the whole voice entry,
+                // as anyway all notes should be tied in a voice:
+                return;
+            }
+        }
+
+        if (entry.ParentVoice.Audible && entry.ParentSourceStaffEntry.ParentStaff.audible) {
             audibleEntries.push(entry);
         }
     }

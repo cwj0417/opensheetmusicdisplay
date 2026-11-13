@@ -11,6 +11,7 @@ import {KeyEnum} from "../../VoiceData/Instructions/KeyInstruction";
 import {AccidentalEnum} from "../../../Common/DataObjects/Pitch";
 import {NoteEnum} from "../../../Common/DataObjects/Pitch";
 import {VexFlowGraphicalNote} from "./VexFlowGraphicalNote";
+import { TabRhythmDot } from "./TabRhythmDot";
 import {GraphicalNote} from "../GraphicalNote";
 import {SystemLinesEnum} from "../SystemLinesEnum";
 import {FontStyles} from "../../../Common/Enums/FontStyles";
@@ -18,20 +19,24 @@ import {Fonts} from "../../../Common/Enums/Fonts";
 import {OutlineAndFillStyleEnum, OUTLINE_AND_FILL_STYLE_DICT} from "../DrawingEnums";
 import log from "loglevel";
 import { ArticulationEnum, StemDirectionType, VoiceEntry } from "../../VoiceData/VoiceEntry";
+import { Articulation } from "../../VoiceData/Articulation";
 import { SystemLinePosition } from "../SystemLinePosition";
 import { GraphicalVoiceEntry } from "../GraphicalVoiceEntry";
 import { OrnamentEnum, OrnamentContainer } from "../../VoiceData/OrnamentContainer";
 import { Notehead, NoteHeadShape } from "../../VoiceData/Notehead";
 import { unitInPixels } from "./VexFlowMusicSheetDrawer";
 import { EngravingRules } from "../EngravingRules";
-import { Note } from "../../../MusicalScore/VoiceData/Note";
+import { Note, TremoloBetweenNotes, TremoloInfo } from "../../../MusicalScore/VoiceData/Note";
 import StaveNote = VF.StaveNote;
 import { ArpeggioType } from "../../VoiceData/Arpeggio";
 import { TabNote } from "../../VoiceData/TabNote";
+import { SourceStaffEntry } from "../../VoiceData/SourceStaffEntry";
 import { PlacementEnum } from "../../VoiceData/Expressions/AbstractExpression";
 import { GraphicalStaffEntry } from "../GraphicalStaffEntry";
-import { Slur } from "../../VoiceData/Expressions/ContinuousExpressions/Slur";
 import { GraphicalLyricEntry } from "../GraphicalLyricEntry";
+import { GraphicalMeasure } from "../GraphicalMeasure";
+import { Staff } from "../../VoiceData/Staff";
+import { VexFlowStaffEntry } from "./VexFlowStaffEntry";
 
 /**
  * Helper class, which contains static methods which actually convert
@@ -71,7 +76,7 @@ export class VexFlowConverter {
     public static durations(fraction: Fraction, isTuplet: boolean): string[] {
         const durations: string[] = [];
         const remainingFraction: Fraction = fraction.clone();
-        while (remainingFraction.RealValue > 0) {
+        while (remainingFraction.RealValue > 0.0001) { // essentially > 0, but using a small delta to prevent infinite loop
             const dur: number = remainingFraction.RealValue;
             // TODO consider long (dur=4) and maxima (dur=8), though Vexflow doesn't seem to support them
             if (dur >= 2) { // Breve
@@ -203,6 +208,8 @@ export class VexFlowConverter {
         switch (notehead.Shape) {
             case NoteHeadShape.NORMAL:
                 return "";
+            case NoteHeadShape.NONE:
+                return ""; // none noteheads are invisible, handled via transparency
             case NoteHeadShape.DIAMOND:
                 return codeStart + "D" + codeFilled;
             case NoteHeadShape.TRIANGLE:
@@ -225,15 +232,66 @@ export class VexFlowConverter {
     }
 
     public static GhostNotes(frac: Fraction): VF.GhostNote[] {
-        const ghostNotes: VF.GhostNote[] = [];
-        const durations: string[] = VexFlowConverter.durations(frac, false);
-        for (const duration of durations) {
-            ghostNotes.push(new VF.GhostNote({
-                duration: duration,
-                //dots: dots
-            }));
+        // Fill the gap with a single ghost note whose ticks exactly match it. A gap can be a
+        // tuplet member (e.g. a triplet eighth = 1/12), which is not a dyadic fraction and so
+        // can't be represented exactly by standard note-value rests: decomposing it overshoots
+        // (1/12 -> 1/16 + 1/64 + 1/128) and drifts the voice's accumulated ticks, breaking
+        // vertical alignment with simultaneous notes in other voices (e.g. cross-staff tuplets).
+        // Setting the ticks directly as an exact rational keeps the voice's resolution multiplier correct.
+        const ghostNote: VF.GhostNote = new VF.GhostNote({
+            duration: VexFlowConverter.durations(frac, true)[0],
+        });
+        // ticks = frac * VF.RESOLUTION, kept as an exact rational via VF.Fraction
+        // (e.g. 1/12 -> 16384/12 -> 4096/3) so the voice's resolution multiplier stays correct.
+        // Fraction keeps the whole part apart (WholeValue), so a gap of a whole note or more needs the expanded numerator.
+        const vfTicks: VF.Fraction = ghostNote.getTicks();
+        vfTicks.numerator = frac.GetExpandedNumerator() * VF.RESOLUTION;
+        vfTicks.denominator = frac.Denominator;
+        vfTicks.simplify();
+        return [ghostNote];
+    }
+
+    /**
+     * Adds an accidental to the key (note) of the given index of a VexFlow note.
+     * @param inParentheses Draw the accidental in parentheses (a cautionary accidental).
+     *   For an accidental made of two signs, only the one next to the notehead gets them,
+     *   as VexFlow draws parentheses around a single accidental sign.
+     */
+    private static addAccidental(vfnote: VF.StaveNote, index: number, type: string, inParentheses: boolean = false): void {
+        const accidental: VF.Accidental = new VF.Accidental(type);
+        if (inParentheses) {
+            // setAsCautionary() also makes the accidental smaller (font_scale 28 instead of 38).
+            //   An accidental in parentheses keeps the size of the note's other accidentals.
+            const fontScale: number = (accidental as any).render_options.font_scale;
+            accidental.setAsCautionary();
+            (accidental as any).render_options.font_scale = fontScale;
+            (accidental as any).reset(); // recreate the accidental and parentheses glyphs with the font scale
         }
-        return ghostNotes;
+        // for grace notes, this makes the accidental smaller, including its parentheses (Accidental.setNote())
+        vfnote.addAccidental(index, accidental);
+    }
+
+    /**
+     * Whether a rest that is moved above (or below) the notes of the other voices of its staff entry would be moved towards
+     * the staff of a note's voice, i.e. past a cross-staff note from that staff. MusicXML files usually number the voices of a part
+     * with several staves by staff: 1-4 on the upper staff, 5-8 on the lower one, so voices 1 and 5 are the upper voices.
+     * E.g. the notes of voice 1 that reach down into the lower staff are above the lower staff's voice 5,
+     * so voice 5's rest doesn't go above them, between the staves. Neither does voice 2's rest go below the notes of voice 5
+     * that reach up into the upper staff.
+     * @param restVoiceId the voice of the rest
+     * @param noteVoiceId the voice of a note in the rest's staff entry
+     * @param restAbove whether the rest is moved above the other voices' notes (upper voice), or else below them
+     * @param numberOfStaves the number of staves of the part
+     * @returns true if the note's voice belongs to another staff of the part, on the side the rest would be moved to
+     */
+    private static restMovesTowardsStaffOfVoice(restVoiceId: number, noteVoiceId: number, restAbove: boolean, numberOfStaves: number): boolean {
+        const restVoiceStaffIndex: number = Math.floor((restVoiceId - 1) / 4);
+        const noteVoiceStaffIndex: number = Math.floor((noteVoiceId - 1) / 4);
+        const isStaffIndex: (index: number) => boolean = (index: number): boolean => index >= 0 && index < numberOfStaves; // false for NaN
+        if (!isStaffIndex(restVoiceStaffIndex) || !isStaffIndex(noteVoiceStaffIndex) || noteVoiceStaffIndex === restVoiceStaffIndex) {
+            return false; // same staff, or voice numbers that don't follow the numbering by staff
+        }
+        return (noteVoiceStaffIndex < restVoiceStaffIndex) === restAbove;
     }
 
     /**
@@ -245,7 +303,7 @@ export class VexFlowConverter {
         // if (gve.octaveShiftValue !== OctaveEnum.NONE) { // gves with accidentals in octave shift brackets can be unsorted
         gve.sortForVexflow(); // also necessary for some other cases, see test_sorted_notes... sample
         //   sort and reverse replace the array anyways, so we might as well directly sort them reversely for now.
-        //   otherwise we should copy the array, see the commented GraphicalVoiceEntry.sortedNotesCopyForVexflow()
+        //   otherwise we should copy the array first
         //   another alternative: don't sort gve notes, instead collect and sort tickables in an array,
         //     then iterate over the array by addTickable() in VexFlowMeasure.graphicalMeasureCreatedCalculations()
         const notes: GraphicalNote[] = gve.notes;
@@ -260,12 +318,16 @@ export class VexFlowConverter {
         const accidentals: string[] = [];
         const baseNoteLength: Fraction = baseNote.graphicalNoteLength;
         const isTuplet: boolean = baseNote.sourceNote.NoteTuplet !== undefined;
-        let duration: string = VexFlowConverter.durations(baseNoteLength, isTuplet)[0];
+        const durations: string[] = VexFlowConverter.durations(baseNoteLength, isTuplet);
+        let duration: string = durations[0];
         if (baseNote.sourceNote.TypeLength !== undefined &&
             baseNote.sourceNote.TypeLength !== baseNoteLength &&
             baseNote.sourceNote.TypeLength.RealValue !== 0) {
             duration = VexFlowConverter.durations(baseNote.sourceNote.TypeLength, isTuplet)[0];
-            baseNote.numberOfDots = baseNote.sourceNote.DotsXml;
+            // Every chord member contributes to numDots below, so use the written dots for all of them.
+            for (const note of notes) {
+                note.numberOfDots = note.sourceNote.DotsXml;
+            }
         }
         let vfClefType: string = undefined;
         let numDots: number = baseNote.numberOfDots;
@@ -295,7 +357,7 @@ export class VexFlowConverter {
                         let previousVoiceEntry: VoiceEntry, followingVoiceEntry: VoiceEntry;
                         let pauseVEIndex: number = -1;
                         for (let i: number = 0; i < neighborGSEs.length; i++) {
-                            if (neighborGSEs[i]?.graphicalVoiceEntries[0].parentVoiceEntry === pauseVoiceEntry) {
+                            if (neighborGSEs[i]?.graphicalVoiceEntries[0]?.parentVoiceEntry === pauseVoiceEntry) {
                                 pauseVEIndex = i;
                                 break;
                             }
@@ -327,32 +389,48 @@ export class VexFlowConverter {
                     baseNoteLength.RealValue === note.sourceNote.SourceMeasure.ActiveTimeSignature.RealValue;
                 if (isWholeMeasureRest) {
                     keys = ["d/5"];
+                    if (gve.parentStaffEntry.parentMeasure.ParentStaff.StafflineCount <= 2) {
+                        keys = ["b/4"]; // the line of a one-line staff, the top line of a 2-line staff (see VexFlowMeasure.setLineNumber())
+                    }
                     duration = "w";
                     numDots = 0;
                     // If it's a whole rest we want it smack in the middle. Apparently there is still an issue in vexflow:
                     // https://github.com/0xfe/vexflow/issues/579 The author reports that he needs to add some negative x shift
                     // if the measure has no modifiers.
-                    alignCenter = true;
-                    xShift = rules.WholeRestXShiftVexflow * unitInPixels; // TODO find way to make dependent on the modifiers
-                    // affects VexFlowStaffEntry.calculateXPosition()
+                    // Keep the rest at its time when a key inside the measure would collide with a centered rest.
+                    const keyInMeasure: boolean = gve.parentStaffEntry.parentMeasure.staffEntries.some(
+                        (entry: GraphicalStaffEntry) => (entry as VexFlowStaffEntry).vfKeys?.length > 0);
+                    if (!keyInMeasure) {
+                        alignCenter = true;
+                        xShift = rules.WholeRestXShiftVexflow * unitInPixels; // TODO find way to make dependent on the modifiers
+                        // affects VexFlowStaffEntry.calculateXPosition()
+                    }
                 }
                 //If we have more than one visible voice entry, shift the rests so no collision occurs
                 if (note.sourceNote.ParentStaff.Voices.length > 1) {
                     const staffGves: GraphicalVoiceEntry[] = note.parentVoiceEntry.parentStaffEntry.graphicalVoiceEntries;
                     //Find all visible voice entries (don't want invisible rests/notes causing visible shift)
                     const restVoiceId: number = note.parentVoiceEntry.parentVoiceEntry.ParentVoice.VoiceId;
+                    const isUpperVoiceRest: boolean = restVoiceId === 1 || restVoiceId === 5;
+                    const lineShiftDirection: number = isUpperVoiceRest ? 1 : -1; // voice 1: put rest above (-y). other voices: below
+                    const numberOfStaves: number = note.sourceNote.ParentStaff.ParentInstrument.Staves.length;
                     let maxHalftone: number;
                     let linesShift: number;
                     for (const staffGve of staffGves) {
                         for (const gveNote of staffGve.notes) {
-                            if (gveNote === note || gveNote.sourceNote.isRest() || !gveNote.sourceNote.PrintObject) {
+                            if (gveNote === note || gveNote.sourceNote.isRest() || !gveNote.sourceNote.isVisible()) {
+                                continue;
+                            }
+                            // A cross-staff note doesn't move the rest towards the staff of its voice (see restMovesTowardsStaffOfVoice()).
+                            //   Like in MuseScore, the rest stays at its position then, and VexFlow's StaveNote.format() still moves it
+                            //   a line away if it overlaps the note.
+                            const noteVoiceId: number = gveNote.parentVoiceEntry.parentVoiceEntry.ParentVoice.VoiceId;
+                            if (VexFlowConverter.restMovesTowardsStaffOfVoice(restVoiceId, noteVoiceId, isUpperVoiceRest, numberOfStaves)) {
                                 continue;
                             }
                             // unfortunately, we don't have functional note bounding boxes at this point,
                             //   so we have to infer the note positions and sizes manually.
                             const wantedStemDirection: StemDirectionType = gveNote.parentVoiceEntry.parentVoiceEntry.WantedStemDirection;
-                            const isUpperVoiceRest: boolean = restVoiceId === 1 || restVoiceId === 5;
-                            const lineShiftDirection: number = isUpperVoiceRest ? 1 : -1; // voice 1: put rest above (-y). other voices: below
                             const gveNotePitch: Pitch = gveNote.sourceNote.Pitch;
                             const noteHalftone: number = gveNotePitch.getHalfTone();
                             const newHigh: boolean = lineShiftDirection === 1 && noteHalftone > maxHalftone;
@@ -464,53 +542,129 @@ export class VexFlowConverter {
             (vfnote as any).stagger_same_whole_notes = rules.StaggerSameWholeNotes;
             //   it would be nice to only save this once, not for every note, but has to be accessible in stavenote.js
             const lyricsEntries: GraphicalLyricEntry[] = gve.parentStaffEntry.LyricsEntries;
-            if (rules.RenderLyrics && rules.LyricsUseXPaddingForShortNotes && lyricsEntries.length > 0) {
+
+            let nextOrCloseNoteHasLyrics: boolean = true;
+            let extraExistingPadding: number = 0;
+            if (lyricsEntries.length > 0 &&
+                rules.RenderLyrics &&
+                rules.LyricsUseXPaddingForLongLyrics
+            ) { // if these conditions don't apply, we don't need the following calculation
+                // don't add padding if next note or close note (within quarter distance) has no lyrics
+                //   usually checking the last note is enough, but
+                //   sometimes you get e.g. a 16th with lyrics, one without lyrics, then one with lyrics again,
+                //   easily causing an overlap as well
+                //   the overlap is fixed by measure elongation, but leads to huge measures (see EngravingRule MaximumLyricsElongationFactor)
+                const startingGMeasure: GraphicalMeasure = gve.parentStaffEntry.parentMeasure;
+                const startingSEIndex: number = startingGMeasure.staffEntries.indexOf(gve.parentStaffEntry);
+                // const staffEntries: VoiceEntry[] = gve.parentVoiceEntry.ParentVoice.VoiceEntries;
+                //   unfortunately the voice entries apparently don't include rests, so they would be ignored
+                const staffEntriesToCheck: GraphicalStaffEntry [] = [];
+                for (let seIndex: number = startingSEIndex + 1; seIndex < startingGMeasure.staffEntries.length; seIndex++) {
+                    const se: GraphicalStaffEntry = startingGMeasure.staffEntries[seIndex];
+                    if (se.graphicalVoiceEntries[0]) {
+                        staffEntriesToCheck.push(se);
+                    }
+                }
+                // // also check next measure:
+                // //   problem: hard to get the next measure object here. (might need to put .nextMeasure into GraphicalMeasure)
+                // const stafflineMeasures: GraphicalMeasure[] = startingGMeasure.ParentStaffLine.Measures;
+                // const measureIndexInStaffline: number = stafflineMeasures.indexOf(startingGMeasure);
+                // if (measureIndexInStaffline + 1 < stafflineMeasures.length) {
+                //     const nextMeasure: GraphicalMeasure = stafflineMeasures[measureIndexInStaffline + 1];
+                //     for (const se of nextMeasure.staffEntries) {
+                //         staffEntriesToCheck.push(se);
+                //     }
+                // }
+                let totalDistanceFromFirstNote: Fraction;
+                let lastTimestamp: Fraction = gve.parentStaffEntry.relInMeasureTimestamp.clone();
+                for (const currentSE of staffEntriesToCheck) {
+                    const currentTimestamp: Fraction = currentSE.relInMeasureTimestamp.clone();
+                    totalDistanceFromFirstNote = Fraction.minus(currentTimestamp, gve.parentVoiceEntry.Timestamp);
+                    if (totalDistanceFromFirstNote.RealValue > 0.25) { // more than a quarter note distance: don't add padding
+                        nextOrCloseNoteHasLyrics = false;
+                        break;
+                    }
+                    if (currentSE.LyricsEntries.length > 0) {
+                        // nextOrCloseNoteHasLyrics = true;
+                        break;
+                    }
+                    const lastDistanceCovered: Fraction = Fraction.minus(currentTimestamp, lastTimestamp);
+                    extraExistingPadding += lastDistanceCovered.RealValue * 32; // for every 8th note in between (0.125), we need around 4 padding less (*4*8)
+                    lastTimestamp = currentTimestamp;
+                }
+                // if the for loop ends without breaking, we are at measure end and assume we need padding
+            }
+            if (rules.RenderLyrics &&
+                rules.LyricsUseXPaddingForLongLyrics &&
+                lyricsEntries.length > 0 &&
+                nextOrCloseNoteHasLyrics) {
                 // VexFlowPatch: add padding to the right for large lyrics,
                 //   so that measure doesn't need to be enlarged too much for spacing
 
                 let hasShortNotes: boolean = false;
-                let paddingMultiplier: number = 1;
+                let padding: number = 0;
                 for (const note of notes) {
                     if (note.sourceNote.Length.RealValue <= 0.125) { // 8th or shorter
                         hasShortNotes = true;
-                        if (note.sourceNote.Length.RealValue <= 0.0625) { // 16th or shorter
-                            paddingMultiplier = 1.7;
-                        }
+                        // if (note.sourceNote.Length.RealValue <= 0.0625) { // 16th or shorter
+                        //     padding += 0.0; // unnecessary by now. what rather needs more padding is eighth notes now.
+                        // }
                         break;
                     }
                 }
 
-                if (hasShortNotes) {
-                    let addPadding: boolean = false;
-                    for (const lyricsEntry of lyricsEntries) {
-                        const widthThreshold: number = rules.LyricsXPaddingWidthThreshold;
-                        // letters like i and l take less space, so we should use the visual width and not number of characters
-                        let currentLyricsWidth: number = lyricsEntry.GraphicalLabel.PositionAndShape.Size.width;
-                        if (lyricsEntry.hasDashFromLyricWord()) {
-                            currentLyricsWidth += 1.5;
+                let addPadding: boolean = false;
+                const widthThreshold: number = rules.LyricsXPaddingWidthThreshold;
+                // check if we need padding because next staff entry also has long lyrics or it's the last note in the measure
+                const currentStaffEntry: GraphicalStaffEntry = gve.parentStaffEntry;
+                const measureStaffEntries: GraphicalStaffEntry[] = currentStaffEntry.parentMeasure.staffEntries;
+                const currentStaffEntryIndex: number = measureStaffEntries.indexOf(currentStaffEntry);
+                const isLastNoteInMeasure: boolean = currentStaffEntryIndex === measureStaffEntries.length - 1;
+                // each verse has its own syllable here, and a later verse's syllable can be longer than the first verse's,
+                //   so take the padding the widest-reaching verse needs, not the first one above the threshold.
+                for (const lyricsEntry of lyricsEntries) {
+                    // letters like i and l take less space, so we should use the visual width and not number of characters
+                    let currentLyricsWidth: number = lyricsEntry.GraphicalLabel.PositionAndShape.Size.width;
+                    if (lyricsEntry.hasDashFromLyricWord()) {
+                        currentLyricsWidth += 0.5;
+                    }
+                    if (currentLyricsWidth > widthThreshold) {
+                        // if (currentLyricsWidth > 4) {
+                        //     padding *= 1.15; // only maybe needed if LyricsXPaddingFactorForLongLyrics < 1
+                        // }
+                        let verseExistingPadding: number = extraExistingPadding;
+                        // The regular reduction compensates for the natural buffer between the last note
+                        // and the bar line. If this lyric is a multi-syllable mid-word continuation
+                        // (a dash trails to the next syllable in the next measure), that buffer is much
+                        // smaller — the next measure's first note has a syllable + dash glyph right at
+                        // its start. Use a smaller reduction (LyricsXPaddingReductionForLastNoteInMeasureCrossMeasureMidWord)
+                        // to add some extra padding without over-padding.
+                        const isCrossMeasureMidWord: boolean = isLastNoteInMeasure && lyricsEntry.hasDashFromLyricWord();
+                        if (isLastNoteInMeasure) {
+                            verseExistingPadding += isCrossMeasureMidWord
+                                ? rules.LyricsXPaddingReductionForLastNoteInMeasureCrossMeasureMidWord
+                                : rules.LyricsXPaddingReductionForLastNoteInMeasure;
                         }
-                        if (currentLyricsWidth > widthThreshold) {
-                            paddingMultiplier *= currentLyricsWidth / widthThreshold;
-                            // check if we need padding because next staff entry also has long lyrics or it's the last note in the measure
-                            const currentStaffEntry: GraphicalStaffEntry = gve.parentStaffEntry;
-                            const measureStaffEntries: GraphicalStaffEntry[] = currentStaffEntry.parentMeasure.staffEntries;
-                            const currentStaffEntryIndex: number = measureStaffEntries.indexOf(currentStaffEntry);
-                            if (currentStaffEntryIndex === measureStaffEntries.length - 1) {
-                                // addPadding = true; // last note in the measure
-                                // probably unnecessary
-                            } else {
+                        if (!hasShortNotes) {
+                            verseExistingPadding += rules.LyricsXPaddingReductionForLongNotes; // quarter or longer notes need less padding
+                        }
+                        if (rules.LyricsXPaddingForLastNoteInMeasure || !isLastNoteInMeasure) {
+                            if (currentLyricsWidth > widthThreshold + verseExistingPadding) {
                                 addPadding = true;
+                                // we don't need to add the e.g. 1.2 we already get from measure end padding
+                                // for last note in the measure, this is usually not necessary,
+                                //   but in rare samples with quite long text on the last note it is.
+                                padding = Math.max(padding, currentLyricsWidth - widthThreshold - verseExistingPadding);
                             }
-                            break;
                         }
-                        // for situations unlikely to cause overlap we shouldn't add padding,
-                        //   e.g. Brooke West sample (OSMD Function Test Chord Symbols) - width ~3.1 in measure 11 on 'ling', no padding needed.
-                        //   though Beethoven - Geliebte has only 8ths in measure 2 and is still problematic,
-                        //   so unfortunately we can't just check if the next note is 16th or less.
                     }
-                    if (addPadding) {
-                        (vfnote as any).paddingRight = 10 * rules.LyricsXPaddingFactorForLongLyrics * paddingMultiplier;
-                    }
+                    // for situations unlikely to cause overlap we shouldn't add padding,
+                    //   e.g. Brooke West sample (OSMD Function Test Chord Symbols) - width ~3.1 in measure 11 on 'ling', no padding needed.
+                    //   though Beethoven - Geliebte has only 8ths in measure 2 and is still problematic,
+                    //   so unfortunately we can't just check if the next note is 16th or less.
+                }
+                if (addPadding) {
+                    (vfnote as any).paddingRight = 10 * rules.LyricsXPaddingFactorForLongLyrics * padding;
                 }
             }
         }
@@ -553,7 +707,7 @@ export class VexFlowConverter {
             if (!stemColor && defaultColorStem) {
                 stemColor = defaultColorStem;
             }
-            const stemStyle: Object = { fillStyle: stemColor, strokeStyle: stemColor };
+            const stemStyle: object = { fillStyle: stemColor, strokeStyle: stemColor };
 
             if (stemColor) {
                 //gve.parentVoiceEntry.StemColor = stemColor; // this shouldn't be set by DefaultColorStem
@@ -590,21 +744,36 @@ export class VexFlowConverter {
         for (let i: number = 0, len: number = notes.length; i < len; i += 1) {
             (notes[i] as VexFlowGraphicalNote).setIndex(vfnote, i);
             if (accidentals[i]) {
-                if (accidentals[i] === "###") { // triple sharp
-                    vfnote.addAccidental(i, new VF.Accidental("##"));
-                    vfnote.addAccidental(i, new VF.Accidental("#"));
-                    continue;
+                // <accidental parentheses="yes"> or bracket="yes", e.g. a cautionary accidental.
+                //   VexFlow has no brackets for accidentals, so bracketed ones are drawn in parentheses too.
+                const sourceNote: Note = notes[i].sourceNote;
+                const inParentheses: boolean = sourceNote.AccidentalParenthesesXml || sourceNote.AccidentalBracketXml;
+                if (accidentals[i] === "sharp-sharp") { // two separate sharp signs, not the double-sharp cross
+                    VexFlowConverter.addAccidental(vfnote, i, "#", inParentheses);
+                    VexFlowConverter.addAccidental(vfnote, i, "#");
+                } else if (accidentals[i] === "natural-sharp") { // natural sign, then sharp sign (the first accidental added is drawn next to the notehead)
+                    VexFlowConverter.addAccidental(vfnote, i, "#", inParentheses);
+                    VexFlowConverter.addAccidental(vfnote, i, "n");
+                } else if (accidentals[i] === "natural-flat") { // natural sign, then flat sign
+                    VexFlowConverter.addAccidental(vfnote, i, "b", inParentheses);
+                    VexFlowConverter.addAccidental(vfnote, i, "n");
+                } else if (accidentals[i] === "###") { // triple sharp
+                    VexFlowConverter.addAccidental(vfnote, i, "##", inParentheses);
+                    VexFlowConverter.addAccidental(vfnote, i, "#");
                 } else if (accidentals[i] === "bbs") { // triple flat
-                    vfnote.addAccidental(i, new VF.Accidental("bb"));
-                    vfnote.addAccidental(i, new VF.Accidental("b"));
-                    continue;
+                    VexFlowConverter.addAccidental(vfnote, i, "bb", inParentheses);
+                    VexFlowConverter.addAccidental(vfnote, i, "b");
+                } else {
+                    VexFlowConverter.addAccidental(vfnote, i, accidentals[i], inParentheses); // normal accidental
                 }
-                vfnote.addAccidental(i, new VF.Accidental(accidentals[i])); // normal accidental
             }
 
-            // add Tremolo strokes (only single note tremolos for now, Vexflow doesn't have beams for two-note tremolos yet)
-            const tremoloStrokes: number = notes[i].sourceNote.TremoloStrokes;
-            if (tremoloStrokes > 0) {
+            // add Tremolo strokes for single note tremolos
+            //   (strokes for tremolos between two notes are drawn in VexFlowMusicSheetDrawer.drawTremolosBetweenNotes())
+            const tremoloInfo: TremoloInfo = notes[i].sourceNote.TremoloInfo;
+            const tremoloStrokes: number = tremoloInfo?.tremoloStrokes;
+            const isTremoloBetweenNotes: boolean = tremoloInfo?.tremoloBetweenNotesStart || tremoloInfo?.tremoloBetweenNotesStop;
+            if (tremoloStrokes > 0 && !isTremoloBetweenNotes) {
                 const tremolo: VF.Tremolo = new VF.Tremolo(tremoloStrokes);
                 (tremolo as any).extra_stroke_scale = rules.TremoloStrokeScale;
                 (tremolo as any).y_spacing_scale = rules.TremoloYSpacingScale;
@@ -612,13 +781,43 @@ export class VexFlowConverter {
             }
         }
 
+        // tremolo between two notes: lengthen the stem if necessary to make room for the strokes (e.g. for 4+ strokes),
+        //   as recommended by Gould (Behind Bars). The strokes are drawn in VexFlowMusicSheetDrawer.drawTremolosBetweenNotes().
+        let tremoloBetweenNotes: TremoloBetweenNotes;
+        for (const note of notes) {
+            if (note.sourceNote.TremoloInfo?.tremoloBetweenNotes) {
+                tremoloBetweenNotes = note.sourceNote.TremoloInfo.tremoloBetweenNotes;
+                break;
+            }
+        }
+        if (tremoloBetweenNotes?.strokes > 0 && !gve.parentVoiceEntry.IsGrace && vfnote.hasStem()) {
+            const strokesHeight: number = tremoloBetweenNotes.strokes * rules.TremoloBetweenNotesStrokeThickness +
+                (tremoloBetweenNotes.strokes - 1) * rules.TremoloBetweenNotesStrokeGap;
+            // strokes + padding towards notehead and stem tip + half notehead height (the strokes region starts at the notehead's edge):
+            const wantedStemLengthPx: number = (strokesHeight + 2 * rules.TremoloBetweenNotesYPadding + 0.5) * unitInPixels;
+            if (wantedStemLengthPx > (VF.Stem as any).HEIGHT) { // default stem length (35px = 3.5 units)
+                (vfnote as any).setStemLength(wantedStemLengthPx); // sets vfnote.stemExtensionOverride
+                vfnote.getStem()?.setExtension(vfnote.getStemExtension()); // apply to the already built stem
+            }
+        }
+
         // half note tremolo: set notehead to half note (Vexflow otherwise takes the notehead from duration) (Hack)
         if (firstNote.Length.RealValue === 0.25 && firstNote.Notehead && firstNote.Notehead.Filled === false) {
-            const keyProps: Object[] = vfnote.getKeyProps();
+            const keyProps: object[] = vfnote.getKeyProps();
             for (let i: number = 0; i < keyProps.length; i++) {
                 (<any>keyProps[i]).code = "v81";
             }
         }
+        // too early for this to be set, unless we read the custom notehead from XML, so this might be useful in future:
+        //   (currently, custom notehead is set in VexFlowVoiceEntry.applyCustomNoteheads(), which happens after load(), unlike this)
+        // for (let i: number = 0; i < notes.length; i++) {
+        //     const note: VexFlowGraphicalNote = notes[i] as VexFlowGraphicalNote;
+        //     if (note.sourceNote.CustomNoteheadVFCode) {
+        //         // (vfnote as any).customGlyphs[i] = note.CustomNoteheadVFCode;
+        //         const keyProps: Object[] = vfnote.getKeyProps();
+        //         (<any>keyProps[i]).code = note.sourceNote.CustomNoteheadVFCode;
+        //     }
+        // }
 
         for (let i: number = 0, len: number = numDots; i < len; ++i) {
             vfnote.addDotToAll();
@@ -632,11 +831,45 @@ export class VexFlowConverter {
             return;
         }
 
-        for (const articulation of gNote.sourceNote.ParentVoiceEntry.Articulations) {
+        // While another voice sounds in the staff, a mark at the note head faces it, e.g. the accent above a stem-down A4
+        //   lands on the head of a stem-up C5 of the other voice. Two parts sharing a staff put their marks at the stem end
+        //   instead (Gould, Behind Bars, pp. 117-118). A beamed group is placed as a whole, at the stem end if another voice
+        //   sounds during any of its notes: not some dots below the heads and some above the beam. A placement from the XML
+        //   still wins.
+        //   Of a chord, only the first note in the XML is in the beam (not necessarily gNote, the lowest).
+        const articulations: Articulation[] = VexFlowConverter.getDrawnArticulations(gNote.sourceNote.ParentVoiceEntry);
+        const beamNotes: Note[] = gNote.sourceNote.ParentVoiceEntry.Notes[0].NoteBeam?.Notes ?? [gNote.sourceNote];
+        const otherVoiceSounding: boolean = articulations.length > 0 &&
+            beamNotes.some((note: Note) => VexFlowConverter.otherVoiceSoundsDuring(note.ParentVoiceEntry));
+        for (const articulation of articulations) {
             let vfArtPosition: number = VF.Modifier.Position.ABOVE;
 
-            if (vfnote.getStemDirection() === VF.Stem.UP) {
+            if (otherVoiceSounding) {
+                if (vfnote.getStemDirection() === VF.Stem.DOWN) {
+                    vfArtPosition = VF.Modifier.Position.BELOW;
+                }
+            } else if (vfnote.getStemDirection() === VF.Stem.UP) {
                 vfArtPosition = VF.Modifier.Position.BELOW;
+
+                // if rules.ArticulationAboveNoteForStemUp set:
+                // set accents (>/^) and other articulations above note instead of below (if conditions met).
+                //   Applies to accents (>/^), staccato (.), pizzicato (+), mainly (in our samples).
+                //   Note that this can look bad for some piano score in the left hand,
+                //   which we try to check below, though some xmls make it hard to detect the left hand
+                //   by using one piano instrument per staffline instead of uniting both hands in one instrument. (e.g. An die Musik)
+                if (rules.ArticulationAboveNoteForStemUp) {
+                    const parentMeasure: GraphicalMeasure = gNote.parentVoiceEntry.parentStaffEntry.parentMeasure;
+                    const parentStaff: Staff = parentMeasure?.ParentStaff;
+                    const staves: Staff[] = parentStaff?.ParentInstrument.Staves;
+                    // if not piano left hand / last staffline of system:
+                    if (staves.length === 1 ||
+                        staves.length === 2 && parentStaff !== staves[1]) {
+                            // don't do this for piano left hand. See Schubert An die Musik left hand: looks bad with accents below
+                            vfArtPosition = VF.Modifier.Position.ABOVE;
+                    }
+                    // this "piano left hand check" could be extended to also match old scores using 1 instrument per hand,
+                    //   but this can get complicated especially if there's also e.g. a voice instrument above. (e.g. Schubert An die Musik)
+                }
             }
             let vfArt: VF.Articulation = undefined;
             const articulationEnum: ArticulationEnum = articulation.articulationEnum;
@@ -650,15 +883,18 @@ export class VexFlowConverter {
             switch (articulationEnum) {
                 case ArticulationEnum.accent: {
                     vfArt = new VF.Articulation("a>");
-                    const slurs: Slur[] = gNote.sourceNote.NoteSlurs;
-                    for (const slur of slurs) {
-                        if (slur.StartNote === gNote.sourceNote) { // && slur.PlacementXml === articulation.placement
-                            if (slur.PlacementXml === PlacementEnum.Above) {
-                                vfArt.setYShift(-rules.SlurStartArticulationYOffsetOfArticulation * 10);
-                            } else if (slur.PlacementXml === PlacementEnum.Below) {
-                                vfArt.setYShift(rules.SlurStartArticulationYOffsetOfArticulation * 10);
-                            }
-                        }
+                    (vfArt as any).render_options = {
+                        ...(vfArt as any).render_options,
+                        extra_left_px: 0,
+                        extra_right_px: 0,
+                    };
+                    // Override the articulation's width calculation to prevent extra spacing
+                    const originalGetWidth: any = (vfArt as any).getWidth;
+                    if (originalGetWidth) {
+                        (vfArt as any).getWidth = function (): number {
+                        return 0; // Return 0 width to prevent articulations from adding spacing
+                        // best example: Schubert - An die Musik, measure 2
+                        };
                     }
                     break;
                 }
@@ -705,17 +941,7 @@ export class VexFlowConverter {
                     break;
                 }
                 case ArticulationEnum.invertedfermata: {
-                    const pve: VoiceEntry = gNote.sourceNote.ParentVoiceEntry;
-                    const sourceNote: Note = gNote.sourceNote;
-                    // find inverted fermata, push it to last voice entry in staffentry list,
-                    //   so that it doesn't overlap notes (gets displayed right below higher note)
-                    //   TODO this could maybe be moved elsewhere or done more elegantly,
-                    //     but on the other hand here it only gets checked if we have an inverted fermata anyways, seems efficient.
-                    if (pve !== sourceNote.ParentVoiceEntry.ParentSourceStaffEntry.VoiceEntries.last()) {
-                        pve.Articulations = pve.Articulations.slice(pve.Articulations.indexOf(articulation));
-                        pve.ParentSourceStaffEntry.VoiceEntries.last().Articulations.push(articulation);
-                        continue;
-                    }
+                    // drawn at the last voice entry of the staff entry, see getDrawnArticulations()
                     vfArt = new VF.Articulation("a@u");
                     vfArtPosition = VF.Modifier.Position.BELOW;
                     articulation.placement = PlacementEnum.Below;
@@ -768,6 +994,53 @@ export class VexFlowConverter {
         }
     }
 
+    /** The articulations drawn at the voice entry's note: its own, but the inverted fermatas of its staff entry go to the
+     *  staff entry's last voice entry, so that they don't overlap the notes of the other voices (#1278): the fermata of a
+     *  stem-up note is drawn right below a lower voice's note, not over it.
+     *  The model stays as it is. Before, the fermata was added to the last voice entry's articulations (and stayed in its
+     *  own voice entry's), so every further calculation, e.g. after updateGraphic(), drew it once more. */
+    private static getDrawnArticulations(voiceEntry: VoiceEntry): Articulation[] {
+        const isInvertedFermata: (articulation: Articulation) => boolean =
+            (articulation: Articulation): boolean => articulation.articulationEnum === ArticulationEnum.invertedfermata;
+        const staffVoiceEntries: VoiceEntry[] = voiceEntry.ParentSourceStaffEntry?.VoiceEntries ?? [voiceEntry];
+        if (voiceEntry !== staffVoiceEntries.last()) {
+            return voiceEntry.Articulations.filter((articulation: Articulation): boolean => !isInvertedFermata(articulation));
+        }
+        const articulations: Articulation[] = voiceEntry.Articulations.slice();
+        for (const otherVoiceEntry of staffVoiceEntries) {
+            if (otherVoiceEntry !== voiceEntry) {
+                articulations.push(...otherVoiceEntry.Articulations.filter(isInvertedFermata));
+            }
+        }
+        return articulations;
+    }
+
+    /** Whether a visible note or rest of another voice in the staff sounds during the voice entry, e.g. a half note of
+     *  another voice under the second quarter of the measure. Notes and rests that aren't drawn (see Note.isVisible()),
+     *  e.g. of a voice only for playback, don't count. */
+    private static otherVoiceSoundsDuring(voiceEntry: VoiceEntry): boolean {
+        const length: (entry: VoiceEntry) => number =
+            (entry: VoiceEntry): number => Math.max(...entry.Notes.map((note: Note) => note.Length.RealValue));
+        const staffEntry: SourceStaffEntry = voiceEntry.ParentSourceStaffEntry;
+        const staffIndex: number = staffEntry.ParentStaff.idInMusicSheet;
+        const start: number = staffEntry.Timestamp.RealValue;
+        const end: number = start + length(voiceEntry);
+        for (const container of staffEntry.VerticalContainerParent.ParentMeasure.VerticalSourceStaffEntryContainers) {
+            const otherStaffEntry: SourceStaffEntry = container.StaffEntries[staffIndex];
+            const otherStart: number = otherStaffEntry?.Timestamp.RealValue;
+            if (!otherStaffEntry || otherStart >= end) {
+                continue;
+            }
+            for (const other of otherStaffEntry.VoiceEntries) {
+                if (other.ParentVoice !== voiceEntry.ParentVoice && otherStart + length(other) > start &&
+                    other.Notes.some((note: Note) => note.isVisible())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     public static generateOrnaments(vfnote: VF.StemmableNote, oContainer: OrnamentContainer): void {
         let vfPosition: number = VF.Modifier.Position.ABOVE;
         if (oContainer.placement === PlacementEnum.Below) {
@@ -817,14 +1090,36 @@ export class VexFlowConverter {
             }
         }
         if (vfOrna) {
+            // a list of accidentals, which our VexFlowPatch of ornament.js draws side by side
             if (oContainer.AccidentalBelow !== AccidentalEnum.NONE) {
-                vfOrna.setLowerAccidental(Pitch.accidentalVexflow(oContainer.AccidentalBelow));
+                vfOrna.setLowerAccidental(
+                    VexFlowConverter.ornamentAccidentals(oContainer.AccidentalBelow, oContainer.AccidentalBelowXml) as any);
             }
             if (oContainer.AccidentalAbove !== AccidentalEnum.NONE) {
-                vfOrna.setUpperAccidental(Pitch.accidentalVexflow(oContainer.AccidentalAbove));
+                vfOrna.setUpperAccidental(
+                    VexFlowConverter.ornamentAccidentals(oContainer.AccidentalAbove, oContainer.AccidentalAboveXml) as any);
             }
-            vfOrna.setPosition(vfPosition); // Vexflow draws it above right now in any case, never below
+            vfOrna.setPosition(vfPosition);
             (vfnote as StaveNote).addModifier(0, vfOrna);
+        }
+    }
+
+    /** The VexFlow accidentals of an ornament's accidental mark, from left to right. As for notes in StaveNote(),
+     *  marks without a glyph of their own are drawn as two accidentals, e.g. sharp-sharp as two sharps. */
+    public static ornamentAccidentals(accidental: AccidentalEnum, accidentalXml: string): string[] {
+        switch (accidental) {
+            case AccidentalEnum.DOUBLESHARP:
+                return accidentalXml === "sharp-sharp" ? ["#", "#"] : ["##"];
+            case AccidentalEnum.SHARP:
+                return accidentalXml === "natural-sharp" ? ["n", "#"] : ["#"];
+            case AccidentalEnum.FLAT:
+                return accidentalXml === "natural-flat" ? ["n", "b"] : ["b"];
+            case AccidentalEnum.TRIPLESHARP:
+                return ["#", "##"];
+            case AccidentalEnum.TRIPLEFLAT:
+                return ["b", "bb"];
+            default:
+                return [Pitch.accidentalVexflow(accidental)];
         }
     }
 
@@ -857,12 +1152,13 @@ export class VexFlowConverter {
     public static CreateTabNote(gve: GraphicalVoiceEntry): VF.TabNote {
         const tabPositions: {str: number, fret: number}[] = [];
         const notes: GraphicalNote[] = gve.notes.reverse();
-        const tabPhrases: { type: number, text: string, width: number }[] = [];
+        const tabPhrases: { type: number, text: string }[] = [];
         const frac: Fraction = gve.notes[0].graphicalNoteLength;
         const isTuplet: boolean = gve.notes[0].sourceNote.NoteTuplet !== undefined;
         let duration: string = VexFlowConverter.durations(frac, isTuplet)[0];
         let numDots: number = 0;
-        let tabVibrato: boolean = false;
+        const rules: EngravingRules = gve.parentStaffEntry.parentMeasure.parentSourceMeasure.Rules;
+        let isXNotehead: boolean = false;
         for (const note of gve.notes) {
             const tabNote: TabNote = note.sourceNote as TabNote;
             let tabPosition: {str: number, fret: number} = {str: tabNote.StringNumberTab, fret: tabNote.FretNumber};
@@ -871,28 +1167,31 @@ export class VexFlowConverter {
                     ", likely missing XML string+fret number.");
                 tabPosition = {str: 1, fret: 0}; // random safe values, otherwise it's both undefined for invalid notes
             }
+            if (rules.TabUseXNoteheadShapeForTabNote && note.sourceNote.Notehead?.Shape === NoteHeadShape.X) {
+                (tabPosition as any).fret = "x";
+                isXNotehead = true;
+            }
+            if (tabNote.FretVisible === false) {
+                (tabPosition as any).fret = "";
+            } else if (tabNote.FretParentheses) {
+                (tabPosition as any).fret = `(${tabPosition.fret})`;
+            }
             tabPositions.push(tabPosition);
             if (tabNote.BendArray) {
+                // Like Guitar Pro and MuseScore, a bend is labeled with how far the string is bent after it, from the unbent note:
+                //   a half step and another half step are "1/2" and "Full", a release that leaves a half step is "1/2".
+                let bentSemitones: number = 0;
                 tabNote.BendArray.forEach( function( bend: {bendalter: number, direction: string} ): void {
-                    let phraseText: string;
-                    const phraseStep: number = bend.bendalter - tabPosition.fret;
-                    if (phraseStep > 1) {
-                        phraseText = "Full";
-                    } else if (phraseStep === 1) {
-                        phraseText = "1/2";
-                    } else {
-                        phraseText = "1/4";
-                    }
+                    if (bend.bendalter === 0) { return; }
                     if (bend.direction === "up") {
-                        tabPhrases.push({type: VF.Bend.UP, text: phraseText, width: 10});
+                        bentSemitones += Math.abs(bend.bendalter);
+                        tabPhrases.push({type: VF.Bend.UP, text: VexFlowConverter.bendText(bentSemitones)});
                     } else {
-                        tabPhrases.push({type: VF.Bend.DOWN, text: phraseText, width: 10});
+                        bentSemitones -= Math.abs(bend.bendalter);
+                        // a release back to the unbent note isn't labeled
+                        tabPhrases.push({type: VF.Bend.DOWN, text: bentSemitones > 0 ? VexFlowConverter.bendText(bentSemitones) : ""});
                     }
                 });
-            }
-
-            if (tabNote.VibratoStroke) {
-                tabVibrato = true;
             }
 
             if (numDots < note.numberOfDots) {
@@ -903,24 +1202,64 @@ export class VexFlowConverter {
             duration += "d";
         }
 
-        const vfnote: VF.TabNote = new VF.TabNote({
+        const tabNoteStruct: { duration: string, positions: {str: number, fret: number}[] } = {
             duration: duration,
             positions: tabPositions,
-        });
+        };
+        const stemDirection: StemDirectionType = gve.parentVoiceEntry.WantedStemDirection;
+        // MuseScore's stemless TAB and whole notes have no rhythm dots. Keep OSMD's default unchanged.
+        // Hidden playback notes must not acquire a visible flag or dot; RenderHiddenNotes can opt them back in.
+        const renderRhythm: boolean = rules.TabRhythmRendered && !gve.parentVoiceEntry.IsGrace &&
+            notes.some(note => note.sourceNote.isVisible()) &&
+            gve.parentVoiceEntry.StemDirectionXml !== StemDirectionType.None && stemDirection !== StemDirectionType.None &&
+            (gve.notes[0].sourceNote.TypeLength ?? frac).RealValue < 1;
+        let vfnote: VF.TabNote;
+        if (gve.parentVoiceEntry?.IsGrace) {
+            // Grace note in a tab staff: Vexflow's GraceTabNote draws the fret number smaller (scale 0.6, 7.5pt instead of 10pt font).
+            //   It is drawn as part of a GraceNoteGroup attached to its main note, see VexFlowTabMeasure.graphicalMeasureCreatedCalculations() (#1721)
+            vfnote = new (VF as any).GraceTabNote(tabNoteStruct); // GraceTabNote is missing in the vexflow typings
+        } else {
+            vfnote = renderRhythm ? new VF.TabNote(tabNoteStruct, true) : new VF.TabNote(tabNoteStruct);
+            if (renderRhythm) {
+                if (gve.notes[0].sourceNote.TypeLength?.RealValue === 0.5) {
+                    // Like MuseScore, distinguish half notes from quarters with a half-length TAB rhythm stem.
+                    (vfnote as any).setStemLength(vfnote.getStemLength() / 2); // the VexFlow typings omit the argument
+                }
+                vfnote.setStemDirection(stemDirection === StemDirectionType.Down ? VF.Stem.DOWN : VF.Stem.UP);
+                gve.parentVoiceEntry.StemDirection = stemDirection === StemDirectionType.Down ? StemDirectionType.Down : StemDirectionType.Up;
+            }
+        }
+        (vfnote as any).render_options.font = VexFlowConverter.vexFlowTextCssFont((vfnote as any).render_options.font, rules);
+        if (isXNotehead) {
+            // (vfnote as any).render_options.fretScale = rules.TabXNoteheadScale; // doesn't work, is overwritten later
+            (vfnote as any).render_options.scale = rules.TabXNoteheadScale; // VexFlowPatch
+            (vfnote as any).render_options.TabUseXNoteheadAlternativeGlyph = rules.TabUseXNoteheadAlternativeGlyph; // VexFlowPatch
+            vfnote.updateWidth(); // use .scale, update glyph
+        }
+        if (rules.UsePageBackgroundColorForTabNotes) {
+            (vfnote as any).BackgroundColor = rules.PageBackgroundColor; // may be undefined
+        }
+        // this fixes background color for rects around tab numbers if PageBackgroundColor set or transparent color unsupported.
 
         for (let i: number = 0, len: number = notes.length; i < len; i += 1) {
             (notes[i] as VexFlowGraphicalNote).setIndex(vfnote, i);
         }
 
-        tabPhrases.forEach(function(phrase: { type: number, text: string, width: number }): void {
-            if (phrase.type === VF.Bend.UP) {
-                vfnote.addModifier (new VF.Bend(phrase.text, false));
-            } else {
-                vfnote.addModifier (new VF.Bend(phrase.text, true));
+        if (tabPhrases.length > 0) {
+            // One Bend for all segments, so that a release continues from the preceding bend
+            //   (the legacy constructor's release flag adds an up segment of its own).
+            //   Without a width, VexFlow sizes each segment by its text (Bend.updateWidth()) like the legacy constructor;
+            //   the typings require one.
+            const bend: VF.Bend = new VF.Bend("", false, tabPhrases as { type: number, text: string, width: number }[]);
+            VexFlowConverter.setVexFlowTextFontOfBend(bend, rules);
+            vfnote.addModifier(bend);
+        }
+
+        // The duration already contains the dots in its ticks. Add only the glyphs, once per chord.
+        if (renderRhythm) {
+            for (let index: number = 0; index < numDots; index++) {
+                vfnote.addModifier(new TabRhythmDot(), 0);
             }
-        });
-        if (tabVibrato) {
-            vfnote.addModifier(new VF.Vibrato());
         }
 
         return vfnote;
@@ -1040,7 +1379,7 @@ export class VexFlowConverter {
         let timeSpec: string;
         switch (rhythm.SymbolEnum) {
             case RhythmSymbolEnum.NONE:
-                timeSpec = rhythm.Rhythm.Numerator + "/" + rhythm.Rhythm.Denominator;
+                timeSpec = (rhythm.NumeratorGroups?.join("+") ?? rhythm.Rhythm.Numerator) + "/" + rhythm.Rhythm.Denominator;
                 break;
             case RhythmSymbolEnum.COMMON:
                 timeSpec = "C";
@@ -1154,6 +1493,62 @@ export class VexFlowConverter {
     }
 
     /**
+     * Sets EngravingRules.VexFlowTextFontFamily, if given, as the family of a font that VexFlow draws a text in,
+     * e.g. a rehearsal mark's. The size, weight and style stay VexFlow's.
+     */
+    public static setVexFlowTextFontFamily(font: { family: string }, rules: EngravingRules): void {
+        if (rules.VexFlowTextFontFamily) {
+            font.family = rules.VexFlowTextFontFamily;
+        }
+    }
+
+    /**
+     * Returns the text of a tab bend that leaves the string bent by the given semitones from the unbent note (the note's bends
+     * so far minus its releases, independent of the fret), in whole tones like in tablature:
+     * "1/4", "1/2", "3/4", "Full" (a whole tone), "1 1/4", "1 1/2", ..., "2". Rounded to quarter tones.
+     */
+    private static bendText(semitones: number): string {
+        const quarterTones: number = Math.round(Math.abs(semitones) * 2);
+        if (quarterTones === 4) {
+            return "Full";
+        }
+        const wholeTones: number = Math.floor(quarterTones / 4);
+        const fraction: string = ["", "1/4", "1/2", "3/4"][quarterTones % 4];
+        return wholeTones > 0 ? `${wholeTones} ${fraction}`.trim() : fraction;
+    }
+
+    /**
+     * Draws the text of a bend in EngravingRules.VexFlowTextFontFamily, if given.
+     * VexFlow sizes a bend by an estimate of its text width (7px per character, which fits its 10pt Arial),
+     * so the bend is widened where its text is wider in that family, as VexFlow's Bend.updateWidth() would size it,
+     * if the TextMeasurer can measure it (see ITextMeasurer.computeTextWidthInCssFont()).
+     */
+    private static setVexFlowTextFontOfBend(bend: VF.Bend, rules: EngravingRules): void {
+        if (!rules.VexFlowTextFontFamily) {
+            return;
+        }
+        const font: string = VexFlowConverter.vexFlowTextCssFont((bend as any).font, rules);
+        (bend as any).setFont(font);
+        if (!rules.TextMeasurer.computeTextWidthInCssFont) {
+            return;
+        }
+        for (const part of (bend as any).phrase) {
+            const textWidth: number = rules.TextMeasurer.computeTextWidthInCssFont(part.text, font);
+            part.width = Math.max(part.width, textWidth + 3);
+            part.draw_width = part.width / 2;
+        }
+        (bend as any).updateWidth();
+    }
+
+    /** Like setVexFlowTextFontFamily(), for the CSS fonts like "10pt Arial" that VexFlow uses for tab fret numbers and bends. */
+    public static vexFlowTextCssFont(cssFont: string, rules: EngravingRules): string {
+        if (!rules.VexFlowTextFontFamily) {
+            return cssFont;
+        }
+        return `${cssFont.split(" ")[0]} ${rules.VexFlowTextFontFamily}`;
+    }
+
+    /**
      * Converts the style into a string that VexFlow RenderContext can understand
      * as the weight of the font
      */
@@ -1180,5 +1575,3 @@ export class VexFlowConverter {
         return ret;
     }
 }
-
-

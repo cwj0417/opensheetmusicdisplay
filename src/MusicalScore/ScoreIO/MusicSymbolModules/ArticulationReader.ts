@@ -21,8 +21,10 @@ export class ArticulationReader {
   private getAccEnumFromString(input: string): AccidentalEnum {
     switch (input) {
       case "sharp":
+      case "natural-sharp": // drawn as a natural and a sharp, see VexFlowConverter.ornamentAccidentals()
         return AccidentalEnum.SHARP;
       case "flat":
+      case "natural-flat":
         return AccidentalEnum.FLAT;
       case "natural":
         return AccidentalEnum.NATURAL;
@@ -48,6 +50,8 @@ export class ArticulationReader {
         return AccidentalEnum.SLASHQUARTERSHARP;
       case "slash-sharp":
         return AccidentalEnum.SLASHSHARP;
+      case "slash-flat":
+        return AccidentalEnum.SLASHFLAT;
       case "double-slash-flat":
         return AccidentalEnum.DOUBLESLASHFLAT;
       case "sori":
@@ -213,11 +217,14 @@ export class ArticulationReader {
       }
     }
 
-    const nodeFingering: IXmlElement = technicalNode.element("fingering");
-    if (nodeFingering) {
+    const nodeFingerings: IXmlElement[] = technicalNode.elements("fingering");
+    for (const nodeFingering of nodeFingerings) {
+      // if nodeFingerings.length > 1: isBulkFingering = true in MusicSheetCalculator
       const currentTechnicalInstruction: TechnicalInstruction = this.createTechnicalInstruction(nodeFingering, currentNote);
       currentTechnicalInstruction.type = TechnicalInstructionType.Fingering;
-      currentNote.Fingering = currentTechnicalInstruction;
+      if (!currentNote.Fingering) {
+        currentNote.Fingering = currentTechnicalInstruction;
+      }
       currentVoiceEntry.TechnicalInstructions.push(currentTechnicalInstruction);
     }
     const nodeString: IXmlElement = technicalNode.element("string");
@@ -295,7 +302,10 @@ export class ArticulationReader {
           const placementAttr: Attr = node.attribute("placement");
           if (placementAttr) {
             const placementString: string = placementAttr.value;
-            if (placementString === "below") {
+            // a wavy line is always drawn above the staff: an ornament that starts one stays above with it
+            const startsWavyLine: boolean = ornamentsNode.elements("wavy-line").some(
+              (wavyLine: IXmlElement) => wavyLine.attribute("type")?.value === "start");
+            if (placementString === "below" && !startsWavyLine) {
               ornament.placement = PlacementEnum.Below;
             }
           }
@@ -309,8 +319,9 @@ export class ArticulationReader {
           const accidentalsListArr: IXmlElement[] = accidentalsList;
           for (let idx: number = 0, len: number = accidentalsListArr.length; idx < len; ++idx) {
             const accidentalNode: IXmlElement = accidentalsListArr[idx];
-            let text: string = accidentalNode.value;
-            accidental = this.getAccEnumFromString(text);
+            const accidentalXml: string = accidentalNode.value;
+            accidental = this.getAccEnumFromString(accidentalXml);
+            let text: string;
             const placementAttr: IXmlAttribute = accidentalNode.attribute("placement");
             if (accidentalNode.hasAttributes && placementAttr) {
               text = placementAttr.value;
@@ -322,8 +333,10 @@ export class ArticulationReader {
             }
             if (placement === PlacementEnum.Above) {
               ornament.AccidentalAbove = accidental;
+              ornament.AccidentalAboveXml = accidentalXml;
             } else if (placement === PlacementEnum.Below) {
               ornament.AccidentalBelow = accidental;
+              ornament.AccidentalBelowXml = accidentalXml;
             }
           }
         }

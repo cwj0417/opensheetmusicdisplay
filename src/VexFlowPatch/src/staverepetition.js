@@ -42,6 +42,8 @@ export class Repetition extends StaveModifier {
   getCategory() { return Repetition.CATEGORY; }
   setShiftX(x) { this.x_shift = x; return this; }
   setShiftY(y) { this.y_shift = y; return this; }
+  // VexFlowPatch: a text drawn instead of the type's text and coda glyph, e.g. the words "D.C. senza replica" for a D.C.
+  setText(text) { this.text = text; return this; }
 
   setX(x) { 
     this.x = x; return this;
@@ -50,6 +52,11 @@ export class Repetition extends StaveModifier {
   draw(stave, x) {
     this.setRendered();
 
+    // VexFlowPatch: the text and the coda or segno glyph in a group (class vf-repetition). A repetition of one shape, e.g.
+    //   "D.C." or a segno, gets the group's class instead (<text class="vf-repetition">), and one without shapes (NONE) gets
+    //   no group (see SVGContext.openGroup() with attrs.mergeIntoChild and omitIfEmpty).
+    const ctx = stave.checkContext();
+    ctx.openGroup('repetition', undefined, { mergeIntoChild: true, omitIfEmpty: true });
     switch (this.symbol_type) {
       case Repetition.type.CODA_RIGHT:
         this.drawCodaFixed(stave, x + stave.width);
@@ -91,6 +98,7 @@ export class Repetition extends StaveModifier {
       default:
         break;
     }
+    ctx.closeGroup();
 
     return this;
   }
@@ -109,6 +117,11 @@ export class Repetition extends StaveModifier {
 
   drawSymbolText(stave, x, text, draw_coda) {
     const ctx = stave.checkContext();
+    // VexFlowPatch: the text set by setText(), placed like the type's text
+    if (this.text) {
+      text = this.text;
+      draw_coda = false;
+    }
 
     ctx.save();
     ctx.setFont(this.font.family, this.font.size, this.font.weight);
@@ -122,13 +135,18 @@ export class Repetition extends StaveModifier {
       symbol_x = text_x + ctx.measureText(text).width + 12;
     } else {
       // VexFlowPatch: fix placement, like for DS_AL_CODA
-      this.x_shift = -(text_x + ctx.measureText(text).width + 12 + stave.options.vertical_bar_width + 12);
+      //   (in a local variable: assigned to this.x_shift, which it is calculated from, it moved the text
+      //   on every further draw of the stave, alternating between this position and one further right)
+      const x_shift = -(text_x + ctx.measureText(text).width + 12 + stave.options.vertical_bar_width + 12);
       // TO_CODA and DS_AL_CODA draw in the next measure without this x_shift, not sure why not for other symbols.
-      text_x = this.x + this.x_shift + stave.options.vertical_bar_width;
+      text_x = this.x + x_shift + stave.options.vertical_bar_width;
       symbol_x = text_x + ctx.measureText(text).width + 12;
     }
     if (this.xShiftAsPercentOfStaveWidth) {
-      const extraShiftX = stave.width * this.xShiftAsPercentOfStaveWidth;
+      // VexFlowPatch: at most up to the end of the stave (its end barline): in a wide measure, the text went past it,
+      //   up to off the page
+      const textEndX = text_x + ctx.measureText(text).width;
+      const extraShiftX = Math.max(0, Math.min(stave.width * this.xShiftAsPercentOfStaveWidth, stave.getX() + stave.width - textEndX));
       if (
         this.symbol_type === Repetition.type.DC_AL_FINE ||
         this.symbol_type === Repetition.type.FINE ||

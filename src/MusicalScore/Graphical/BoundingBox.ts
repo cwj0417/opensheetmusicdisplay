@@ -4,6 +4,7 @@ import {PointF2D} from "../../Common/DataObjects/PointF2D";
 import {SizeF2D} from "../../Common/DataObjects/SizeF2D";
 import {RectangleF2D} from "../../Common/DataObjects/RectangleF2D";
 import { GraphicalObject } from "./GraphicalObject";
+import { ClassType } from "../Interfaces/AClassHierarchyTrackable";
 
 /**
  * A bounding box delimits an area on the 2D plane.
@@ -18,10 +19,14 @@ export class BoundingBox {
     protected yBordersHaveBeenSet: boolean = false;
     protected absolutePosition: PointF2D = new PointF2D();
     protected relativePosition: PointF2D = new PointF2D();
-    protected size: SizeF2D = new SizeF2D();
-    protected marginSize: SizeF2D = new SizeF2D();
-    protected upperLeftCorner: PointF2D = new PointF2D();
-    protected upperLeftMarginCorner: PointF2D = new PointF2D();
+    // The sizes, corners and rectangles are made from the borders when their getter is first called after a border
+    // changed (see calculateRectangle()): most bounding boxes, e.g. those of notes, never need them.
+    protected size: SizeF2D = undefined;
+    protected marginSize: SizeF2D = undefined;
+    protected upperLeftCorner: PointF2D = undefined;
+    protected upperLeftMarginCorner: PointF2D = undefined;
+    protected boundingRectangle: RectangleF2D = undefined;
+    protected boundingMarginRectangle: RectangleF2D = undefined;
     protected borderLeft: number = 0;
     protected borderRight: number = 0;
     protected borderTop: number = 0;
@@ -30,18 +35,16 @@ export class BoundingBox {
     protected borderMarginRight: number = 0;
     protected borderMarginTop: number = 0;
     protected borderMarginBottom: number = 0;
-    protected boundingRectangle: RectangleF2D;
-    protected boundingMarginRectangle: RectangleF2D;
     protected childElements: BoundingBox[] = [];
     protected parent: BoundingBox;
-    protected dataObject: Object;
+    protected dataObject: object;
     /**
      * Create a bounding box
      * @param dataObject Graphical object where the bounding box will be attached
      * @param parent Parent bounding box of an object in a higher hierarchy position
      * @param isSymbol Defines the bounding box to be symbol thus not calculating its boundaries by itself. NOTE: Borders need to be set!
      */
-    constructor(dataObject: Object = undefined, parent: BoundingBox = undefined, isSymbol: boolean = false) {
+    constructor(dataObject: object = undefined, parent: BoundingBox = undefined, isSymbol: boolean = false) {
         this.parent = parent;
         this.dataObject = dataObject;
         this.isSymbol = isSymbol;
@@ -90,6 +93,9 @@ export class BoundingBox {
     }
 
     public get Size(): SizeF2D {
+        if (!this.size) {
+            this.size = new SizeF2D(this.borderRight - this.borderLeft, this.borderBottom - this.borderTop);
+        }
         return this.size;
     }
 
@@ -98,14 +104,23 @@ export class BoundingBox {
     }
 
     public get MarginSize(): SizeF2D {
+        if (!this.marginSize) {
+            this.marginSize = new SizeF2D(this.BorderMarginRight - this.BorderMarginLeft, this.BorderMarginBottom - this.BorderMarginTop);
+        }
         return this.marginSize;
     }
 
     public get UpperLeftCorner(): PointF2D {
+        if (!this.upperLeftCorner) {
+            this.upperLeftCorner = new PointF2D(this.borderLeft, this.borderTop);
+        }
         return this.upperLeftCorner;
     }
 
     public get UpperLeftMarginCorner(): PointF2D {
+        if (!this.upperLeftMarginCorner) {
+            this.upperLeftMarginCorner = new PointF2D(this.BorderMarginLeft, this.BorderMarginTop);
+        }
         return this.upperLeftMarginCorner;
     }
 
@@ -182,10 +197,19 @@ export class BoundingBox {
     }
 
     public get BoundingRectangle(): RectangleF2D {
+        if (!this.boundingRectangle) {
+            this.boundingRectangle = new RectangleF2D(this.borderLeft, this.borderTop,
+                                                      this.borderRight - this.borderLeft, this.borderBottom - this.borderTop);
+        }
         return this.boundingRectangle;
     }
 
     public get BoundingMarginRectangle(): RectangleF2D {
+        if (!this.boundingMarginRectangle) {
+            const left: number = this.BorderMarginLeft;
+            const top: number = this.BorderMarginTop;
+            this.boundingMarginRectangle = new RectangleF2D(left, top, this.BorderMarginRight - left, this.BorderMarginBottom - top);
+        }
         return this.boundingMarginRectangle;
     }
 
@@ -219,7 +243,7 @@ export class BoundingBox {
         }
     }
 
-    public get DataObject(): Object {
+    public get DataObject(): object {
         return this.dataObject;
     }
 
@@ -295,14 +319,29 @@ export class BoundingBox {
 
     /**
      * This method calculates the BoundingBoxes
+     * @param ignoreClasses The classes (or class names, see isInstanceOfClass()) of the objects whose bounding boxes,
+     *   and their children's, to leave as they are, e.g. [GraphicalMeasure]
      */
-    public calculateBoundingBox(): void {
+    public calculateBoundingBox(ignoreClasses: (ClassType | string)[] = []): void {
         if (this.childElements.length === 0) {
             return;
         }
         for (let idx: number = 0, len: number = this.ChildElements.length; idx < len; ++idx) {
             const childElement: BoundingBox = this.ChildElements[idx];
-            childElement.calculateBoundingBox();
+            let calculateChildBbox: boolean = true;
+            for (const classToIgnore of ignoreClasses) {
+                const gObject: GraphicalObject = childElement.DataObject as GraphicalObject;
+                if (gObject.isInstanceOfClass && gObject.isInstanceOfClass(classToIgnore)) {
+                    calculateChildBbox = false;
+                    break;
+                    // measure bbox gets calculated incorrectly, especially with RenderSingleHorizontalStaffline
+                    //   the correct width was previously set via MusicSystemBuilder.setMeasureWidth().
+                }
+            }
+            if (!calculateChildBbox) {
+                continue;
+            }
+            childElement.calculateBoundingBox(ignoreClasses);
         }
 
         // initialize with max/min values
@@ -355,13 +394,21 @@ export class BoundingBox {
         this.yBordersHaveBeenSet = true;
     }
 
-    public calculateTopBottomBorders(): void {
+    /**
+     * Calculates the top and bottom borders (and margins) of this bounding box from those of its child elements.
+     * @param recursive whether to calculate those of the child elements first, recursively (default).
+     *   false only recalculates this bounding box, when the borders below it are up to date
+     *   (repeating the calculation for an unchanged child element gives the same borders).
+     */
+    public calculateTopBottomBorders(recursive: boolean = true): void {
         if (this.childElements.length === 0) {
             return;
         }
-        for (let idx: number = 0, len: number = this.ChildElements.length; idx < len; ++idx) {
-            const childElement: BoundingBox = this.ChildElements[idx];
-            childElement.calculateTopBottomBorders();
+        if (recursive) {
+            for (let idx: number = 0, len: number = this.ChildElements.length; idx < len; ++idx) {
+                const childElement: BoundingBox = this.ChildElements[idx];
+                childElement.calculateTopBottomBorders();
+            }
         }
         let minTop: number = Number.MAX_VALUE;
         let maxBottom: number = Number.MIN_VALUE;
@@ -430,7 +477,7 @@ export class BoundingBox {
             - Math.max(this.AbsolutePosition.x + this.borderLeft, psi.absolutePosition.x + psi.borderLeft);
         const overlapHeight: number = Math.min(this.AbsolutePosition.y + this.borderBottom, psi.absolutePosition.y + psi.borderBottom)
             - Math.max(this.AbsolutePosition.y + this.borderTop, psi.absolutePosition.y + psi.borderTop);
-        if (overlapWidth > 0 && overlapHeight > 0) {
+        if (overlapWidth >= 0 && overlapHeight >= 0) {
             return true;
         }
         return false;
@@ -551,34 +598,44 @@ export class BoundingBox {
         } while (hasBeenMoved); // as long as the element is moved
     }
 
-    public getClickedObjectOfType<T>(clickPosition: PointF2D): T {
-        const obj: Object = this.dataObject;
-        if (this.pointLiesInsideBorders(clickPosition) && (<T>obj)) {
-            return (obj as T);
-        }
-        for (let idx: number = 0, len: number = this.childElements.length; idx < len; ++idx) {
-            const psi: BoundingBox = this.childElements[idx];
-            const innerObject: Object = psi.getClickedObjectOfType<T>(clickPosition);
+    /**
+     * Returns the object of the class whose bounding box contains the position, e.g. of a click: of this bounding box or
+     * its descendants, the innermost one, e.g. without a class, at a lyric, its label rather than its staff entry, measure
+     * or page. The generic type T doesn't select the object (types don't exist at runtime), classOrName does.
+     * @param clickPosition The position in units
+     * @param classOrName The class of the object, e.g. GraphicalStaffEntry, or its name, which is unreliable in minified builds
+     *   (see isInstanceOfClass()). By default, any graphical object.
+     */
+    public getClickedObjectOfType<T>(clickPosition: PointF2D, classOrName: ClassType | string = GraphicalObject): T {
+        // the children first: the page's box contains all the others
+        for (const child of this.childElements) {
+            const innerObject: T = child.getClickedObjectOfType<T>(clickPosition, classOrName);
             if (innerObject) {
-                return (innerObject as T);
+                return innerObject;
             }
+        }
+        if (this.dataObject && (this.dataObject as GraphicalObject).isInstanceOfClass(classOrName) && this.pointLiesInsideBorders(clickPosition)) {
+            return this.dataObject as T;
         }
         return undefined;
     }
 
-    //Generics don't work like this in TS. Casting doesn't filter out objects.
-    //instanceof doesn't work either with generic types. Hopefully instanceof becomes available at some point, for now we have to do annoyingly
-    //specific implementations after calling this to filter the objects.
+    /**
+     * Returns the objects of this bounding box and its descendants that lie inside the region (liesInside), or overlap it.
+     * The generic type T doesn't select the objects (types don't exist at runtime), classOrName does.
+     * @param classOrName The class of the objects, e.g. GraphicalMeasure, or its name, which is unreliable in minified builds
+     *   (see isInstanceOfClass())
+     */
     public getObjectsInRegion<T extends GraphicalObject>(region: BoundingBox, liesInside: boolean = true,
-                                                         className: string = GraphicalObject.name): T[] {
+                                                         classOrName: ClassType | string = GraphicalObject): T[] {
         let result: T[] = [];
         for (const child of this.childElements) {
-            result = result.concat(child.getObjectsInRegion<T>(region, liesInside, className));
+            result = result.concat(child.getObjectsInRegion<T>(region, liesInside, classOrName));
         }
 
         //if (!result || result.length === 0) {
         // audioplayer: this.dataObject as T
-        if (this.dataObject && (this.dataObject as T).isInstanceOfClass(className)) {
+        if (this.dataObject && (this.dataObject as T).isInstanceOfClass(classOrName)) {
             if (liesInside) {
                 if (region.liesInsideBorders(this)) {
                     result.push(this.dataObject as T);
@@ -595,16 +652,25 @@ export class BoundingBox {
         //return this.childElements.SelectMany(psi => psi.getObjectsInRegion<T>(region, liesInside));
     }
 
+    /**
+     * Updates the size, upper left corner and rectangle after a border changed: drops them, and their getters make them
+     * from the borders when next called. Also the margin ones, as the margin getters include the borders.
+     */
     protected calculateRectangle(): void {
-        this.upperLeftCorner = new PointF2D(this.BorderLeft, this.BorderTop);
-        this.size = new SizeF2D(this.BorderRight - this.BorderLeft, this.BorderBottom - this.BorderTop);
-        this.boundingRectangle = RectangleF2D.createFromLocationAndSize(this.upperLeftCorner, this.size);
+        this.size = undefined;
+        this.upperLeftCorner = undefined;
+        this.boundingRectangle = undefined;
+        this.calculateMarginRectangle();
     }
 
+    /**
+     * Updates the margin size, upper left margin corner and margin rectangle after a margin changed: drops them, and their
+     * getters make them from the margins when next called.
+     */
     protected calculateMarginRectangle(): void {
-        this.upperLeftMarginCorner = new PointF2D(this.BorderMarginLeft, this.BorderMarginTop);
-        this.marginSize = new SizeF2D(this.BorderMarginRight - this.BorderMarginLeft, this.BorderMarginBottom - this.BorderMarginTop);
-        this.boundingMarginRectangle = RectangleF2D.createFromLocationAndSize(this.upperLeftMarginCorner, this.marginSize);
+        this.marginSize = undefined;
+        this.upperLeftMarginCorner = undefined;
+        this.boundingMarginRectangle = undefined;
     }
 
     /**

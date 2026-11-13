@@ -7,11 +7,12 @@ jobs:
   fetchandbuild:
     runs-on: ubuntu-latest
     steps:
-        - uses: actions/checkout@v3
-        - uses: actions/setup-node@v3
+        - uses: actions/checkout@v4
+        - uses: actions/setup-node@v4
           with:
-            node-version: "16.14.0"
-        - run: yarn
+            node-version: "22"
+        - run: yarn install --ignore-scripts
+        - run: yarn prebuildVexflow
         - run: yarn prod
         - uses: JamesIves/github-pages-deploy-action@v4
           with:

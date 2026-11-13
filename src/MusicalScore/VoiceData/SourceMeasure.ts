@@ -1,16 +1,17 @@
 import {Fraction} from "../../Common/DataObjects/Fraction";
+import {MeasureRepeatInstruction} from "./Instructions/MeasureRepeatInstruction";
 import {VerticalSourceStaffEntryContainer} from "./VerticalSourceStaffEntryContainer";
 import {SourceStaffEntry} from "./SourceStaffEntry";
 import {RepetitionInstruction, RepetitionInstructionEnum, AlignmentType} from "./Instructions/RepetitionInstruction";
 import {Staff} from "./Staff";
-import {VoiceEntry} from "./VoiceEntry";
+import {VoiceEntry, ArticulationEnum} from "./VoiceEntry";
+import {Articulation} from "./Articulation";
 import {Voice} from "./Voice";
 import {MusicSheet} from "../MusicSheet";
 import {MultiExpression} from "./Expressions/MultiExpression";
 import {MultiTempoExpression} from "./Expressions/MultiTempoExpression";
 import {RehearsalExpression} from "./Expressions/RehearsalExpression";
 import {AbstractNotationInstruction} from "./Instructions/AbstractNotationInstruction";
-import {ClefInstruction} from "./Instructions/ClefInstruction";
 import {KeyInstruction} from "./Instructions/KeyInstruction";
 import {Repetition} from "../MusicSource/Repetition";
 import {SystemLinesEnum} from "../Graphical/SystemLinesEnum";
@@ -60,13 +61,36 @@ export class SourceMeasure {
     /** Whether the MusicXML says to print a new page (page break). See OSMDOptions.newPageFromXML */
     public printNewPageXml: boolean = false;
     public IsSystemStartMeasure: boolean = false;
+    /** The graphical measure width will be multiplied by this factor.
+     * E.g. factor 0.6 = 60% will make the measure only 60% as long as before.
+     * Note that this potentially causes issues by counteracting systems like lyrics overlap prevention,
+     * and if you give Vexflow too little width to render it will eventually cause other layout issues too.
+     * This factor is also read by a custom XML attribute osmdWidthFactor in the measure node,
+     *   e.g. <measure number="1" osmdWidthFactor="0.6">
+     * This will either be multiplicative with a sheet-wide widthFactor or override it, depending on settings.
+     *   (TODO sheet-wide widthFactor not yet implemented)
+     */
+    public WidthFactor: number = 1;
 
     private measureNumber: number;
     public MeasureNumberXML: number;
+    /** Whether the measure was marked implicit="yes" in the MusicXML (e.g. a pickup measure, or a measure without
+     *  a proper meter like in Satie's Gnossiennes). Unlike ImplicitMeasure, this comes straight from the XML attribute
+     *  and is not derived from the measure duration. By default such measures don't show a measure number
+     *  (see EngravingRules.RenderMeasureNumbersForImplicitMeasures). */
+    public ImplicitMeasureFromXml: boolean = false;
     public MeasureNumberPrinted: number; // measureNumber if MeasureNumberXML undefined or NaN. Set in getPrintedMeasureNumber()
     public RhythmPrinted: RhythmInstruction; // the rhythm printed (rendered) in this measure
-    public multipleRestMeasures: number; // usually undefined (0), unless "multiple-rest" given in XML (e.g. 4 measure rest)
+    /** How many measures the multiple rest measure beginning with this measure has, usually undefined (0): the number given in the
+     *  MusicXML (multipleRestMeasuresXml), or the number of one generated from rest measures
+     *  (EngravingRules.AutoGenerateMultipleRestMeasuresFromRestMeasures). Set again by each layout calculation (updateGraphic()). */
+    public multipleRestMeasures: number;
+    /** How many measures the multiple rest measure beginning with this measure has in the MusicXML (`<multiple-rest>`,
+     *  e.g. 4 for a 4 measure rest), usually undefined. Each layout calculation starts multipleRestMeasures from it. */
+    public multipleRestMeasuresXml: number;
     // public multipleRestMeasuresPerStaff: Dictionary<number, number>; // key: staffId. value: how many rest measures
+    /** MusicXML measure-repeat declarations indexed by global staff. */
+    public MeasureRepeatInstructions: Map<number, MeasureRepeatInstruction[]> = new Map<number, MeasureRepeatInstruction[]>();
     private absoluteTimestamp: Fraction;
     private completeNumberOfStaves: number;
     private duration: Fraction;
@@ -95,6 +119,10 @@ export class SourceMeasure {
     private rules: EngravingRules;
     private tempoInBPM: number;
     private verticalMeasureList: GraphicalMeasure[]; // useful, see GraphicalMusicSheet.GetGraphicalFromSourceStaffEntry
+    /** Whether this measure was drawn in the last render. Set by the drawer (and the incremental/lazy
+     *  render path) per drawn measure, reset to false at the start of each render(). Lets callers tell which
+     *  measures are currently on-screen, e.g. under a draw range or incremental rendering. */
+    public WasRendered: boolean = false;
 
     public get MeasureNumber(): number {
         return this.measureNumber;
@@ -200,7 +228,7 @@ export class SourceMeasure {
     }
 
     public getPreviousMeasure(measures: SourceMeasure[]): SourceMeasure {
-        if (this.measureListIndex > 1) {
+        if (this.measureListIndex > 0) {
             return measures[this.measureListIndex - 1];
         }
         return undefined;
@@ -430,8 +458,10 @@ export class SourceMeasure {
             for (let j: number = 0; j < musicSheet.Instruments[i].Staves.length; j++) {
                 const lastStaffEntry: SourceStaffEntry = this.getLastSourceStaffEntryForInstrument(inSourceMeasureInstrumentIndex + j);
                 if (lastStaffEntry !== undefined && lastStaffEntry.Timestamp) {
-                    if (instrumentDuration.lt(Fraction.plus(lastStaffEntry.Timestamp, lastStaffEntry.calculateMaxNoteLength()))) {
-                        instrumentDuration = Fraction.plus(lastStaffEntry.Timestamp, lastStaffEntry.calculateMaxNoteLength());
+                    const lastStaffEntryDuration: Fraction = lastStaffEntry.calculateMaxNoteLength(false);
+                    // untilEndOfTie = false: don't set measure duration until end of tie, which could be in next measure!
+                    if (instrumentDuration.lt(Fraction.plus(lastStaffEntry.Timestamp, lastStaffEntryDuration))) {
+                        instrumentDuration = Fraction.plus(lastStaffEntry.Timestamp, lastStaffEntryDuration);
                     }
                 }
             }
@@ -468,13 +498,24 @@ export class SourceMeasure {
         return false;
     }
 
+    public beginsWithRepetition(): boolean {
+        return this.beginsWithLineRepetition() || this.beginsWithWordRepetition();
+    }
+
     public beginsWithLineRepetition(): boolean {
         for (let idx: number = 0, len: number = this.FirstRepetitionInstructions.length; idx < len; ++idx) {
             const instr: RepetitionInstruction = this.FirstRepetitionInstructions[idx];
             if (instr.type === RepetitionInstructionEnum.StartLine) {
+                // Skip virtual "overall repetition" StartLine markers (FromWords=true) that are created by RepetitionCalculator
+                //   for cursor/playback purposes - these should not force a visible repeat barline.
+                //   It just creates a virtual repetition, which basically means the whole piece is a repetition, repeated 0 times.
+                if (instr.parentRepetition !== undefined && instr.parentRepetition.FromWords) {
+                    continue;
+                }
                 return true;
             }
-            if (instr.parentRepetition !== undefined && instr === instr.parentRepetition.startMarker && !instr.parentRepetition.FromWords) {
+            if (instr.parentRepetition !== undefined && instr === instr.parentRepetition.startMarker && !instr.parentRepetition.FromWords
+                && instr.type !== RepetitionInstructionEnum.None) {
                 return true;
             }
         }
@@ -589,19 +630,30 @@ export class SourceMeasure {
      * @param instrumentIndex
      * @returns {SourceStaffEntry}
      */
-    private getLastSourceStaffEntryForInstrument(instrumentIndex: number): SourceStaffEntry {
+    private getLastSourceStaffEntryForInstrument(instrumentIndex: number, skipChordOnlyEntry: boolean = true): SourceStaffEntry {
         let entry: SourceStaffEntry;
         for (let i: number = this.verticalSourceStaffEntryContainers.length - 1; i >= 0; i--) {
             entry = this.verticalSourceStaffEntryContainers[i].StaffEntries[instrumentIndex];
-            if (entry) {
-                break;
+            if (entry && (!skipChordOnlyEntry || entry.VoiceEntries.length > 0)) {
+                return entry;
             }
         }
-        return entry;
+    }
+
+    /** Whether the repetition instruction is a start marker that isn't drawn (see beginsWithLineRepetition()):
+     *  the start of the repetition of the whole piece, which RepetitionCalculator adds for the iteration (a StartLine from words),
+     *  or the start of a repetition without a start line (None), e.g. at the start of a piece with a backward repeat or a D.C.
+     */
+    private static isUndrawnStartMarker(instruction: RepetitionInstruction): boolean {
+        return instruction.type === RepetitionInstructionEnum.None ||
+            instruction.type === RepetitionInstructionEnum.StartLine &&
+            instruction.parentRepetition !== undefined && instruction.parentRepetition.FromWords;
     }
 
     public canBeReducedToMultiRest(): boolean {
-        if (this.firstRepetitionInstructions.length > 0 || this.lastRepetitionInstructions.length > 0) {
+        // a multiple rest measure would hide the repetition instructions, except the start markers that aren't drawn anyway
+        if (this.firstRepetitionInstructions.some(instruction => !SourceMeasure.isUndrawnStartMarker(instruction)) ||
+            this.lastRepetitionInstructions.length > 0) {
             return false;
         }
         let allRestsOrInvisible: boolean = true;
@@ -611,16 +663,29 @@ export class SourceMeasure {
                 continue;
             }
             for (const staffEntry of container.StaffEntries) {
-                if (!staffEntry || !staffEntry.ParentStaff.ParentInstrument.Visible) {
+                if (!staffEntry || !staffEntry.ParentStaff.isVisible()) {
                     continue; // ignore notes in invisible instruments (instruments not shown)
                 }
                 if (staffEntry.ChordContainers.length > 0) {
+                    return false;
+                }
+                if (staffEntry.Instructions.some(instruction => instruction instanceof KeyInstruction)) {
                     return false;
                 }
                 if (staffEntry.ParentStaff.hasLyrics) {
                     visibleLyrics = true;
                 }
                 for (const voiceEntry of staffEntry.VoiceEntries) {
+                    // ignore the notes of a hidden voice that is left out of the layout, as if it weren't there
+                    //   (see Voice.isHiddenInShownInstrument() and EngravingRules.HiddenVoicesKeepLayout)
+                    if (!this.rules?.HiddenVoicesKeepLayout && voiceEntry.ParentVoice.isHiddenInShownInstrument()) {
+                        continue;
+                    }
+                    // a multiple rest measure would hide a fermata on a rest (a pause bar)
+                    if (voiceEntry.Articulations.some((articulation: Articulation): boolean =>
+                        articulation.articulationEnum === ArticulationEnum.fermata || articulation.articulationEnum === ArticulationEnum.invertedfermata)) {
+                        return false;
+                    }
                     for (const note of voiceEntry.Notes) {
                         if (!note.isRest()) {
                             allRestsOrInvisible = false;
@@ -642,15 +707,8 @@ export class SourceMeasure {
                 return false;
             }
         }
-        // check for clef instruction for next measure
-        for (const lastStaffEntry of this.lastInstructionsStaffEntries) {
-            for (let idx: number = 0, len: number = lastStaffEntry?.Instructions.length; idx < len; ++idx) {
-                const abstractNotationInstruction: AbstractNotationInstruction = lastStaffEntry.Instructions[idx];
-                if (abstractNotationInstruction instanceof ClefInstruction) {
-                    return false;
-                }
-            }
-        }
+        // a clef change at the end (for the next measure) is no reason against it: the multiple rest measure then ends
+        //   with this measure and draws the clef at its end (see MusicSheetCalculator.prepareGraphicalMusicSheet())
         // don't auto-rest pickup measures that aren't whole measure rests
         return this.Duration?.RealValue === this.ActiveTimeSignature?.RealValue;
         // if adding further checks, replace the above line with this:

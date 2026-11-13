@@ -28,22 +28,24 @@ export class CanvasVexFlowBackend extends VexFlowBackend {
     }
 
     public getCanvasSize(): number {
-        return document.getElementById("osmdCanvasPage" + this.graphicalMusicPage.PageNumber)?.offsetHeight;
+        return this.inner?.offsetHeight;
         // smaller inner canvas:
-        // return Number.parseInt(
-        //     document.getElementById("osmdCanvasVexFlowBackendCanvas" + this.graphicalMusicPage.PageNumber)?.style.height, 10);
+        // return Number.parseInt(this.canvas?.style.height, 10);
     }
 
-    public initialize(container: HTMLElement, zoom: number): void {
+    public initialize(container: HTMLElement, zoom: number, id: string = undefined): void {
         this.zoom = zoom;
         this.canvas = document.createElement("canvas");
         if (!this.graphicalMusicPage) {
             this.graphicalMusicPage = new GraphicalMusicPage(undefined);
             this.graphicalMusicPage.PageNumber = 1;
         }
-        this.canvas.id = "osmdCanvasVexFlowBackendCanvas" + this.graphicalMusicPage.PageNumber; // needed to extract image buffer from js
+        if (!id) {
+            id = this.graphicalMusicPage.PageNumber.toString();
+        }
+        this.canvas.id = "osmdCanvasVexFlowBackendCanvas" + id; // needed to extract image buffer from js
         this.inner = document.createElement("div");
-        this.inner.id = "osmdCanvasPage" + this.graphicalMusicPage.PageNumber;
+        this.inner.id = "osmdCanvasPage" + id;
         this.inner.style.position = "relative";
         this.canvas.style.zIndex = "0";
         this.inner.appendChild(this.canvas);
@@ -74,6 +76,18 @@ export class CanvasVexFlowBackend extends VexFlowBackend {
         return this.ctx;
     }
 
+    public free(): void {
+        if (this.canvas) {
+            // the following seems to only be necessary on iOS, preventing a memory leak (#1411)
+            (this.canvas as any).width = 0;
+            (this.canvas as any).height = 0;
+
+            this.canvas.remove();
+            delete this.canvas;
+            this.canvas = null;
+        }
+    }
+
     public clear(): void {
         (<any>this.ctx).clearRect(0, 0, (<any>this.canvas).width, (<any>this.canvas).height);
 
@@ -88,6 +102,52 @@ export class CanvasVexFlowBackend extends VexFlowBackend {
         }
     }
 
+    /**
+     * Resizes the canvas, keeping what is drawn on it. Resizing a canvas clears its bitmap, and incremental rendering
+     * (renderNext) grows the canvas as it appends batches: downwards on the endless page, to the right with
+     * RenderSingleHorizontalStaffline. So snapshot the current pixels, redraw them after resizing, and fill the rest of
+     * the canvas with the page background (if set). For a normal render the canvas is still empty here, and clear()
+     * fills it afterwards, so this is effectively a no-op.
+     * @param width the new width in pixels
+     * @param height the new height in pixels
+     */
+    public resize(width: number, height: number): void {
+        const canvas: any = this.canvas;
+        let snapshot: any;
+        if (canvas && canvas.width > 0 && canvas.height > 0) {
+            snapshot = document.createElement("canvas");
+            snapshot.width = canvas.width;
+            snapshot.height = canvas.height;
+            snapshot.getContext("2d").drawImage(canvas, 0, 0);
+        }
+        super.resize(width, height);
+        if (canvas && (snapshot || this.rules.PageBackgroundColor)) {
+            const ctx2d: any = canvas.getContext("2d");
+            ctx2d.save();
+            ctx2d.setTransform(1, 0, 0, 1, 0, 0); // work in raw device pixels
+            if (this.rules.PageBackgroundColor) {
+                // The grown (transparent) area right of and below the kept pixels needs the page background.
+                //   Without a snapshot, that's the whole canvas, e.g. one that was 0 wide (the page of a single horizontal
+                //   staffline that no batch has reached yet). The corner is filled once, with the area below, and the kept
+                //   pixels not at all, so that a semi-transparent color doesn't get more opaque there.
+                const keptWidth: number = Math.min(snapshot?.width ?? 0, canvas.width);
+                const keptHeight: number = Math.min(snapshot?.height ?? 0, canvas.height);
+                ctx2d.fillStyle = this.rules.PageBackgroundColor;
+                ctx2d.fillRect(keptWidth, 0, canvas.width - keptWidth, keptHeight); // right of them
+                ctx2d.fillRect(0, keptHeight, canvas.width, canvas.height - keptHeight); // below them, including the corner
+            }
+            if (snapshot) {
+                ctx2d.drawImage(snapshot, 0, 0); // restore the previously rendered batches at the top left
+                // Release the snapshot's pixels now, not when it's garbage collected: each batch copies the whole canvas, and in
+                //   Node (node-canvas frees them only after the current task), the copies of a loop of renderNext() calls, like
+                //   renderRemaining(), piled up, e.g. to 4 GB for ActorPreludeSample on a single horizontal staffline.
+                snapshot.width = 0;
+                snapshot.height = 0;
+            }
+            ctx2d.restore();
+        }
+    }
+
     public scale(k: number): void {
         this.ctx.scale(k, k);
     }
@@ -97,9 +157,14 @@ export class CanvasVexFlowBackend extends VexFlowBackend {
     }
     public renderText(fontHeight: number, fontStyle: FontStyles, font: Fonts, text: string,
                       heightInPixel: number, screenPosition: PointF2D,
-                      color: string = undefined, fontFamily: string = undefined): Node  {
+                      color: string = undefined, fontFamily: string = undefined, language: string = undefined): Node {
         const old: string = this.CanvasRenderingCtx.font;
         this.CanvasRenderingCtx.save();
+        // the canvas context's lang (e.g. in Chrome, not yet in every browser), reset by restore()
+        const ctx: CanvasRenderingContext2D & { lang?: string } = this.CanvasRenderingCtx;
+        if (language && "lang" in ctx) {
+            ctx.lang = language;
+        }
         this.CanvasRenderingCtx.font = VexFlowConverter.font(
             fontHeight,
             fontStyle,
@@ -166,7 +231,13 @@ export class CanvasVexFlowBackend extends VexFlowBackend {
         return undefined;
     }
 
-    public renderPath(points: PointF2D[], fill: boolean = true, id?: string): Node {
+    public renderPath(points: PointF2D[], fill: boolean = true, id?: string, color?: string): Node {
+        const oldFillStyle: string | CanvasGradient | CanvasPattern = this.CanvasRenderingCtx.fillStyle;
+        const oldStrokeStyle: string | CanvasGradient | CanvasPattern = this.CanvasRenderingCtx.strokeStyle;
+        if (color) {
+            this.CanvasRenderingCtx.fillStyle = color;
+            this.CanvasRenderingCtx.strokeStyle = color;
+        }
         this.ctx.beginPath();
         let currentPoint: PointF2D;
         for (const point of points) {
@@ -184,6 +255,8 @@ export class CanvasVexFlowBackend extends VexFlowBackend {
         } else {
             this.ctx.stroke(); // just trace outline, don't fill inner area
         }
+        this.CanvasRenderingCtx.fillStyle = oldFillStyle;
+        this.CanvasRenderingCtx.strokeStyle = oldStrokeStyle;
         return undefined;
     }
 

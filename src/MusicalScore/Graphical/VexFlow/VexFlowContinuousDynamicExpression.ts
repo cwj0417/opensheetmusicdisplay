@@ -16,15 +16,21 @@ export class VexFlowContinuousDynamicExpression extends GraphicalContinuousDynam
         super(continuousDynamic, staffLine, measure);
         if (this.IsVerbal) {
             const sourceLabel: Label = new Label(continuousDynamic.Label);
+            sourceLabel.language = continuousDynamic.language;
             this.label = new GraphicalLabel(sourceLabel,
                                             textHeight ? textHeight : this.rules.ContinuousDynamicTextHeight,
                                             TextAlignmentEnum.LeftCenter,
                                             this.rules,
                                             this.PositionAndShape);
+            this.label.SVGClass = "osmd-dynamic"; // cresc., dim. (the lines of a wedge get "osmd-wedge" from the drawer)
 
             this.label.Label.fontStyle = FontStyles.Italic;
             this.label.setLabelPositionAndShapeBorders();
             this.PositionAndShape.calculateBoundingBox();
+
+            if (continuousDynamic.ColorXML && this.rules.ExpressionsUseXMLColor) {
+                this.label.ColorXML = continuousDynamic.ColorXML;
+            }
         }
     }
 }

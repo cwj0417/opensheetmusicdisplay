@@ -8,11 +8,13 @@ export class Staff {
         this.parentInstrument = parentInstrument;
         this.id = instrumentStaffId;
         this.audible = true;
+        this.Visible = true;
         this.following = true;
     }
 
     public idInMusicSheet: number;
     public audible: boolean;
+    public Visible: boolean;
     public following: boolean;
     public isTab: boolean = false;
 
@@ -21,6 +23,10 @@ export class Staff {
     private volume: number = 1;
     private id: number;
     private stafflineCount: number = 5;
+    /** The number of staff lines the XML gives (<staff-lines>), undefined if it gives none.
+     *  The percussion one-line layout keeps it, see EngravingRules.PercussionKeepXMLStafflineCount.
+     */
+    public xmlStafflineCount: number;
     public hasLyrics: boolean = false;
     public openTieDict: { [_: number]: Tie } = {};
 
@@ -47,5 +53,9 @@ export class Staff {
     }
     public set StafflineCount(value: number) {
         this.stafflineCount = value;
+    }
+    /** Checks whether Staff.Visible and Staff.ParentInstrument.Visible. */
+    public isVisible(): boolean {
+        return this.Visible && this.ParentInstrument.Visible;
     }
 }

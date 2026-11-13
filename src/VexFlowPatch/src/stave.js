@@ -255,10 +255,11 @@ export class Stave extends Element {
   }
 
   // Section functions
-  setSection(section, y, xOffset = 0, fontSize = 12) {
+  setSection(section, y, xOffset = 0, fontSize = 12, minBottomY = undefined) {
     const staveSection = new StaveSection(section, this.x + xOffset, y);
     // staveSection.shift_x = xOffset; // has no effect
     staveSection.font.size = fontSize;
+    staveSection.minBottomY = minBottomY; // VexFlowPatch: shift the section up so its box bottom stays above getYForLine(0)+minBottomY (px, relative to top stave line). avoids overlap with chord symbols
     this.modifiers.push(staveSection);
     return this;
   }
@@ -637,16 +638,23 @@ export class Stave extends Element {
     let y;
 
     // Render lines
-    for (let line = 0; line < num_lines; line++) {
-      y = this.getYForLine(line);
-
+    // VexFlowPatch: in a group of their own (class vf-stave, like VexFlow 4 and 5 draw them) that has their style, e.g.
+    //   stroke="#000000", which the lines inherit (see SVGContext.openGroup() with attrs.strokeStyle): the group's stroke
+    //   attribute colors them, or a CSS rule for .vf-stave. A stave without a visible line (e.g. <staff-lines>0</staff-lines>)
+    //   gets no group.
+    if (this.options.line_config.slice(0, num_lines).some(lineConfig => lineConfig.visible)) {
       this.applyStyle();
-      if (this.options.line_config[line].visible) {
-        this.context.beginPath();
-        this.context.moveTo(x, y);
-        this.context.lineTo(x + width, y);
-        this.context.stroke();
+      this.context.openGroup('stave', undefined, { strokeStyle: true });
+      for (let line = 0; line < num_lines; line++) {
+        if (this.options.line_config[line].visible) {
+          y = this.getYForLine(line);
+          this.context.beginPath();
+          this.context.moveTo(x, y);
+          this.context.lineTo(x + width, y);
+          this.context.stroke();
+        }
       }
+      this.context.closeGroup();
       this.restoreStyle();
     }
 

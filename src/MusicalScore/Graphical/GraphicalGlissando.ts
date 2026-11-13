@@ -3,6 +3,7 @@ import { Glissando } from "../VoiceData/Glissando";
 import { ColDirEnum } from "./BoundingBox";
 import { EngravingRules } from "./EngravingRules";
 import { GraphicalLine } from "./GraphicalLine";
+import { GraphicalMeasure } from "./GraphicalMeasure";
 import { GraphicalNote } from "./GraphicalNote";
 import { GraphicalStaffEntry } from "./GraphicalStaffEntry";
 import { StaffLine } from "./StaffLine";
@@ -42,6 +43,9 @@ export class GraphicalGlissando {
         }
 
         const staffLine: StaffLine = startStaffEntry.parentMeasure.ParentStaffLine;
+        // A note's x is the centre of its note head (see VexFlowStaffEntry.positionNotesAtNoteHeads()): the line starts and ends
+        //   this far from the notes' x, so that it leaves the same space (GlissandoNoteOffset) to both note heads.
+        const noteHeadHalfWidth: number = 0.5;
 
         let startX: number;
         let endX: number;
@@ -51,7 +55,7 @@ export class GraphicalGlissando {
             // must be relative to StaffLine
             startX = glissStartNote.PositionAndShape.RelativePosition.x + glissStartNote.parentVoiceEntry.parentStaffEntry.PositionAndShape.RelativePosition.x
                     + glissStartNote.parentVoiceEntry.parentStaffEntry.parentMeasure.PositionAndShape.RelativePosition.x
-                    + rules.GlissandoNoteOffset;
+                    + noteHeadHalfWidth + rules.GlissandoNoteOffset;
             //const glissStartVE: GraphicalVoiceEntry = glissStartNote.parentVoiceEntry;
             //startY = glissStartVE.PositionAndShape.RelativePosition.y + glissStartVE.PositionAndShape.BorderTop / 2;
             // startY = glissStartNote.PositionAndShape.RelativePosition.y - glissStartNote.PositionAndShape.Size.height / 2;
@@ -67,7 +71,7 @@ export class GraphicalGlissando {
         if (glissEndNote && endStaffEntry.parentMeasure.ParentStaffLine === this.StaffLine) {
             endX = glissEndNote.PositionAndShape.RelativePosition.x + glissEndNote.parentVoiceEntry.parentStaffEntry.PositionAndShape.RelativePosition.x
                 + glissEndNote.parentVoiceEntry.parentStaffEntry.parentMeasure.PositionAndShape.RelativePosition.x
-                - 0.5 - rules.GlissandoNoteOffset; // -0.5: width of notehead. glissEndNote.x seems to be center of notehead.
+                - noteHeadHalfWidth - rules.GlissandoNoteOffset;
             if (startX > endX) { // e.g. when beginInstructionsWidth too big at start of staffline, bigger than note startX
                 startX = endX - rules.GlissandoStafflineStartMinimumWidth;
             }
@@ -75,11 +79,17 @@ export class GraphicalGlissando {
             //endY = glissEndVe.PositionAndShape.RelativePosition.y + glissEndVe.PositionAndShape.BorderTop;
             endY = glissEndNote.PositionAndShape.AbsolutePosition.y;
         } else {
-            if (staffLine.Measures.last().parentSourceMeasure.HasEndLine) {
+            // The staff line can end in an extra measure that only shows a courtesy key or time signature. It has no source
+            //   measure, and the line ends before it, at the end of the last measure.
+            let lastMeasure: GraphicalMeasure = staffLine.Measures.last();
+            if (lastMeasure.IsExtraGraphicalMeasure) {
+                lastMeasure = lastMeasure.ExtraGraphicalMeasurePreviousMeasure;
+            }
+            if (lastMeasure.parentSourceMeasure.HasEndLine) {
                 return;
                 // TODO inquire how this can happen: start of glissando at end of last measure. maybe faulty xml? or about slur/slide indices?
             }
-            endX = staffLine.PositionAndShape.Size.width;
+            endX = lastMeasure.PositionAndShape.RelativePosition.x + lastMeasure.PositionAndShape.Size.width;
             if (endX - startX > rules.GlissandoStafflineEndOffset) {
                 startX = endX - rules.GlissandoStafflineEndOffset;
             } // else: don't try to set a potentially bigger offset for a note very close to the staffline end

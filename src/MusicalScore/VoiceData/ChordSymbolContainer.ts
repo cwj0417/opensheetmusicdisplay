@@ -3,26 +3,31 @@ import {KeyInstruction} from "./Instructions/KeyInstruction";
 import {MusicSheetCalculator} from "../Graphical/MusicSheetCalculator";
 import {AccidentalEnum} from "../../Common/DataObjects/Pitch";
 import { EngravingRules } from "../Graphical/EngravingRules";
+import { PlacementEnum } from "./Expressions/AbstractExpression";
 
 export class ChordSymbolContainer {
     private rootPitch: Pitch;
     private chordKind: ChordSymbolEnum;
+    public NumeralText: string;
     private bassPitch: Pitch;
     private degrees: Degree[];
     private rules: EngravingRules;
+    public Placement: PlacementEnum;
 
     constructor(
         rootPitch: Pitch,
         chordKind: ChordSymbolEnum,
         bassPitch: Pitch,
         chordDegrees: Degree[],
-        rules: EngravingRules
+        rules: EngravingRules,
+        placement: PlacementEnum = PlacementEnum.Above
     ) {
         this.rootPitch = rootPitch;
         this.chordKind = chordKind;
         this.bassPitch = bassPitch;
         this.degrees = chordDegrees;
         this.rules = rules;
+        this.Placement = placement;
     }
 
     public get RootPitch(): Pitch {
@@ -42,13 +47,20 @@ export class ChordSymbolContainer {
     }
 
     public static calculateChordText(chordSymbol: ChordSymbolContainer, transposeHalftones: number, keyInstruction: KeyInstruction): string {
+        // if (!chordSymbol) { // undefined
+        //     return; // handled in VexFlowGraphicalSymbolFactory.createChordSymbols
+        // }
+        if (chordSymbol.NumeralText !== undefined) { // if(chordSymbol.NumeralText) doesn't match empty string
+            return chordSymbol.NumeralText;
+        }
         let transposedRootPitch: Pitch = chordSymbol.RootPitch;
 
         if (MusicSheetCalculator.transposeCalculator) {
             transposedRootPitch = MusicSheetCalculator.transposeCalculator.transposePitch(
                 chordSymbol.RootPitch,
                 keyInstruction,
-                transposeHalftones
+                transposeHalftones,
+                true // chord symbol: a calculator can spell it differently from notes
             );
         }
         if (chordSymbol.ChordKind === ChordSymbolEnum.none) {
@@ -140,7 +152,8 @@ export class ChordSymbolContainer {
                 transposedBassPitch = MusicSheetCalculator.transposeCalculator.transposePitch(
                     chordSymbol.BassPitch,
                     keyInstruction,
-                    transposeHalftones
+                    transposeHalftones,
+                    true
                 );
             }
             text += "/";

@@ -20,13 +20,24 @@ export class Tuplet {
     /** Notes contained in the tuplet, per VoiceEntry (list of VoiceEntries, which has a list of notes). */
     private notes: Note[][] = []; // TODO should probably be VoiceEntry[], not Note[][].
     private fractions: Fraction[] = [];
+    public Ratioed: boolean;
     /** Whether this tuplet has a bracket. (e.g. showing |--3--| or just 3 for a triplet) */
     private bracket: boolean;
     /** Boolean if 'bracket="no"' or "yes" was explicitly requested in the XML, otherwise undefined. */
     public BracketedXmlValue: boolean;
+    /** Whether <tuplet show-number="none"> was given in the XML, indicating the tuplet number should not be rendered. */
+    public ShowNumberNoneGivenInXml: boolean;
 
     /** Determines whether the tuplet should be bracketed (arguments are EngravingRules). */
-    public shouldBeBracketed(useXmlValue: boolean, tupletsBracketed: boolean, tripletsBracketed: boolean): boolean {
+    public shouldBeBracketed(useXmlValue: boolean,
+        tupletsBracketed: boolean,
+        tripletsBracketed: boolean,
+        isTabMeasure: boolean = false,
+        tabTupletsBracketed: boolean = false,
+    ): boolean {
+        if (isTabMeasure) {
+            return tabTupletsBracketed;
+        }
         if (useXmlValue && this.BracketedXmlValue !== undefined) {
             return this.BracketedXmlValue;
         }

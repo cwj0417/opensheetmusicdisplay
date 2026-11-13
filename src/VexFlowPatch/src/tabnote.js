@@ -185,6 +185,11 @@ export class TabNote extends StemmableNote {
   getStemExtension() {
     const glyph = this.getGlyph();
 
+    // Honor StemmableNote.setStemLength(), including OSMD's shorter rhythmic TAB half notes.
+    if (this.stemExtensionOverride != null) {
+      return this.stemExtensionOverride;
+    }
+
     if (this.stem_extension_override != null) {
       return this.stem_extension_override;
     }
@@ -212,7 +217,11 @@ export class TabNote extends StemmableNote {
     for (let i = 0; i < this.positions.length; ++i) {
       let fret = this.positions[i].fret;
       if (this.ghost) fret = '(' + fret + ')';
-      const glyph = Flow.tabToGlyph(fret, this.render_options.scale);
+      const glyphScale = this.render_options.fretScale ?? this.render_options.scale;
+      const glyph = Flow.tabToGlyph(fret, glyphScale, this.render_options.TabUseXNoteheadAlternativeGlyph);
+      if (fret === 'x') {
+        glyph.isXGlyph = true;
+      }
       this.glyphs.push(glyph);
       this.width = Math.max(glyph.getWidth(), this.width);
     }
@@ -435,8 +444,7 @@ export class TabNote extends StemmableNote {
       const glyph = this.glyphs[i];
 
       let currentGlyphWidth = glyph.getWidth();
-      if (currentGlyphWidth === 0 && glyph.text && glyph.text.toString() && glyph.text.toString().length) {
-        // above: glyph.text?.toString()?.length would be shorter, but fails appveyor build
+      if (currentGlyphWidth === 0 && glyph.text?.toString()?.length) {
         // VexflowPatch: workaround for generateImages script -> SVG export
         currentGlyphWidth = glyph.text.toString().length * 7;
       }
@@ -448,8 +456,21 @@ export class TabNote extends StemmableNote {
       }
       const tab_x = x + (note_glyph_width / 2) - (currentGlyphWidth / 2);
 
-      // FIXME: Magic numbers.
-      ctx.clearRect(tab_x - 2, y - 3, currentGlyphWidth + 4, 6);
+      // VexFlowPatch: a hidden (empty) fret, e.g. OSMD's TabNote.FretVisible false, clears no gap in the string line.
+      //   Its rect and text are still drawn, for the order of the elements (see OSMD's VexFlowGraphicalNote.getTabNoteSVGs()).
+      const rectWidth = glyph.text === '' ? 0 : currentGlyphWidth + 4;
+      // VexFlowPatch: fix black instead of transparent rectangles around tab notes in certain scenarios
+      //   e.g. when EngravingRules.PageBackgroundColor set or image viewer displays transparent as black
+      if (this.BackgroundColor) {
+        ctx.save();
+        ctx.setFillStyle(this.BackgroundColor);
+        ctx.setLineWidth(0);
+        // FIXME: Magic numbers.
+        ctx.fillRect(tab_x - 2, y - 3, rectWidth, 6);
+        ctx.restore();
+      } else {
+        ctx.clearRect(tab_x - 2, y - 3, rectWidth, 6);
+      }
 
       if (glyph.code) {
         Glyph.renderGlyph(ctx, tab_x, y,
@@ -480,8 +501,9 @@ export class TabNote extends StemmableNote {
     this.setRendered();
     const render_stem = this.beam == null && this.render_options.draw_stem;
 
-    // VexFlowPatch: open group for tabnote (with id), so that the SVG DOM has a named element for tabnote, like stavenote
-    this.context.openGroup('tabnote', this.getAttribute('id'), { pointerBBox: true });
+    // VexFlowPatch: open group for tabnote (with id), so that the SVG DOM has a named element for tabnote, like stavenote.
+    //   Also keep it as the 'el' attribute, like stavenote (OSMD's GraphicalNote.getSVGGElement())
+    this.setAttribute('el', this.context.openGroup('tabnote', this.getAttribute('id'), { pointerBBox: true }));
     this.drawPositions();
     this.drawStemThrough();
 
@@ -490,7 +512,7 @@ export class TabNote extends StemmableNote {
     this.stem.setNoteHeadXBounds(stem_x, stem_x);
 
     if (render_stem) {
-      this.context.openGroup('stem', null, { pointerBBox: true });
+      this.context.openGroup('stem', null, { pointerBBox: true, mergeIntoChild: true }); // VexFlowPatch: mergeIntoChild
       this.stem.setContext(this.context).draw();
       this.context.closeGroup();
     }

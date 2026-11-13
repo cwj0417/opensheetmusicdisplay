@@ -9,7 +9,7 @@ import {Instrument} from "../../Instrument";
 import {MultiExpression} from "../../VoiceData/Expressions/MultiExpression";
 import {IXmlAttribute, IXmlElement} from "../../../Common/FileIO/Xml";
 import {SourceMeasure} from "../../VoiceData/SourceMeasure";
-import {InstantaneousTempoExpression} from "../../VoiceData/Expressions/InstantaneousTempoExpression";
+import {InstantaneousTempoExpression, MetronomeNote, MetronomeNoteGroup, MetronomeTuplet} from "../../VoiceData/Expressions/InstantaneousTempoExpression";
 import {MoodExpression} from "../../VoiceData/Expressions/MoodExpression";
 import {UnknownExpression} from "../../VoiceData/Expressions/UnknownExpression";
 import {PlacementEnum} from "../../VoiceData/Expressions/AbstractExpression";
@@ -19,12 +19,18 @@ import log from "loglevel";
 import { FontStyles } from "../../../Common/Enums/FontStyles";
 import { RehearsalExpression } from "../../VoiceData/Expressions/RehearsalExpression";
 import { Pedal } from "../../VoiceData/Expressions/ContinuousExpressions/Pedal";
+import { WavyLine } from "../../VoiceData/Expressions/ContinuousExpressions/WavyLine";
+import { musicXmlColorToCss } from "../../../Common/DataObjects/XmlColor";
 
 export class ExpressionReader {
     private musicSheet: MusicSheet;
     private placement: PlacementEnum;
     private soundTempo: number;
+    private soundTimestamp: Fraction;
+    private explicitSoundTempo: number;
     private soundDynamic: number;
+    private soundDynamicTimestamp: Fraction;
+    private divisions: number;
     private offsetDivisions: number;
     private staffNumber: number;
     private globalStaffIndex: number;
@@ -33,10 +39,22 @@ export class ExpressionReader {
     private openContinuousDynamicExpressions: ContinuousDynamicExpression[] = [];
     private openContinuousTempoExpression: ContinuousTempoExpression;
     private activeInstantaneousDynamic: InstantaneousDynamicExpression;
-    private openOctaveShift: OctaveShift;
+    private openOctaveShifts: Map<number, OctaveShift> = new Map();
+    private pendingOctaveShiftStops: Map<number, {measure: SourceMeasure, endTimestamp: Fraction}> = new Map();
     private lastWedge: ContinuousDynamicExpression;
     private WedgeYPosXml: number;
     private openPedal: Pedal;
+    private openWavyLine: WavyLine;
+    /** Unicode text for SMuFL note symbols between words, e.g. metNote8thUp in "Fast (Straight ♪)".
+     *  Notes use the text's font or a fallback font. Stem-down variants use the same note value's stem-up character.
+     *  Unsupported names are omitted without removing the surrounding words. */
+    private static readonly noteSymbolTexts: ReadonlyMap<string, string> = new Map([
+        ["metNoteWhole", "\u{1D15D}"], ["metNoteHalfUp", "\u{1D15E}"],
+        ["metNoteQuarterUp", "\u2669"], ["metNote8thUp", "\u266A"],
+        ["metNote16thUp", "\u{1D161}"], ["metNote32ndUp", "\u{1D162}"],
+        ["metNote64thUp", "\u{1D163}"], ["metNote128thUp", "\u{1D164}"],
+        ["metAugmentationDot", "\u00B7"],
+    ]);
     constructor(musicSheet: MusicSheet, instrument: Instrument, staffNumber: number) {
         this.musicSheet = musicSheet;
         this.staffNumber = staffNumber;
@@ -50,6 +68,7 @@ export class ExpressionReader {
                                     currentMeasureIndex: number,
                                     ignoreDivisionsOffset: boolean): void {
         this.initialize();
+        this.divisions = divisions;
         const offsetNode: IXmlElement = xmlNode.element("offset");
         if (offsetNode !== undefined && !ignoreDivisionsOffset) {
             try {
@@ -62,34 +81,8 @@ export class ExpressionReader {
             }
         }
         this.directionTimestamp = Fraction.createFromFraction(inSourceMeasureCurrentFraction);
-        let offsetFraction: Fraction = new Fraction(Math.abs(this.offsetDivisions), divisions * 4);
 
-        if (this.offsetDivisions > 0) {
-            if (inSourceMeasureCurrentFraction.RealValue > 0) {
-                offsetFraction = Fraction.multiply(Fraction.minus(inSourceMeasureCurrentFraction, inSourceMeasureFormerFraction), offsetFraction);
-                this.directionTimestamp = Fraction.plus(offsetFraction, inSourceMeasureCurrentFraction);
-            } else { this.directionTimestamp = Fraction.createFromFraction(offsetFraction); }
-        } else if (this.offsetDivisions < 0) {
-            if (inSourceMeasureCurrentFraction.RealValue > 0) {
-                offsetFraction = Fraction.multiply(Fraction.minus(inSourceMeasureCurrentFraction, inSourceMeasureFormerFraction), offsetFraction);
-                this.directionTimestamp = Fraction.minus(inSourceMeasureCurrentFraction, offsetFraction);
-            } else { this.directionTimestamp = Fraction.createFromFraction(offsetFraction); }
-        }
-
-        // read default-y for wedge node
-        let newWedgeYPos: number;
-        const directionTypeNode: IXmlElement = xmlNode.element("direction-type");
-        let wedgeNode: IXmlElement;
-        if (directionTypeNode) {
-            wedgeNode = directionTypeNode.element("wedge");
-            if (wedgeNode) {
-                const yPosAttr: IXmlAttribute = wedgeNode.attribute("default-y");
-                if (yPosAttr) {
-                    newWedgeYPos = this.readPosition(yPosAttr);
-                }
-            }
-        }
-        this.WedgeYPosXml = newWedgeYPos;
+        const directionTypeNodes: IXmlElement[] = xmlNode.elements("direction-type");
 
         const placeAttr: IXmlAttribute = xmlNode.attribute("placement");
         if (placeAttr) {
@@ -108,20 +101,24 @@ export class ExpressionReader {
                 this.placement = PlacementEnum.Below;
             }
         }
-        if (this.placement === PlacementEnum.NotYetDefined) {
-            try {
-                if (directionTypeNode) {
+        try {
+            for (const directionTypeNode of directionTypeNodes) {
+                const wedgeNode: IXmlElement = directionTypeNode.element("wedge");
+                if (wedgeNode) {
+                    const defAttr: IXmlAttribute = wedgeNode.attribute("default-y");
+                    if (defAttr) {
+                        this.WedgeYPosXml = parseInt(defAttr.value, 10);
+                        if (this.placement === PlacementEnum.NotYetDefined) {
+                            this.readExpressionPlacement(defAttr, "read wedge y pos");
+                        }
+                    }
+                }
+                if (this.placement === PlacementEnum.NotYetDefined) {
                     const dynamicsNode: IXmlElement = directionTypeNode.element("dynamics");
                     if (dynamicsNode) {
                         const defAttr: IXmlAttribute = dynamicsNode.attribute("default-y");
                         if (defAttr) {
                             this.readExpressionPlacement(defAttr, "read dynamics y pos");
-                        }
-                    }
-                    if (wedgeNode) {
-                        const defAttr: IXmlAttribute = wedgeNode.attribute("default-y");
-                        if (defAttr) {
-                            this.readExpressionPlacement(defAttr, "read wedge y pos");
                         }
                     }
                     const wordsNode: IXmlElement = directionTypeNode.element("words");
@@ -139,14 +136,13 @@ export class ExpressionReader {
                         }
                     }
                 }
-            } catch (ex) {
-                const errorMsg: string = ITextTranslation.translateText(  "ReaderErrorMessages/ExpressionPlacementError",
-                                                                          "Invalid expression placement. Set to default.");
-                log.debug("ExpressionReader.readExpressionParameters", errorMsg, ex);
-                this.musicSheet.SheetErrors.pushMeasureError(errorMsg);
-                this.placement = PlacementEnum.Below;
             }
-
+        } catch (ex) {
+            const errorMsg: string = ITextTranslation.translateText(  "ReaderErrorMessages/ExpressionPlacementError",
+                                                                      "Invalid expression placement. Set to default.");
+            log.debug("ExpressionReader.readExpressionParameters", errorMsg, ex);
+            this.musicSheet.SheetErrors.pushMeasureError(errorMsg);
+            this.placement = PlacementEnum.Below;
         }
         if (this.placement === PlacementEnum.NotYetDefined) {
             if (currentInstrument.Staves.length > 1) {
@@ -157,108 +153,154 @@ export class ExpressionReader {
         }
     }
     public read(directionNode: IXmlElement, currentMeasure: SourceMeasure,
-                inSourceMeasureCurrentFraction: Fraction, inSourceMeasurePreviousFraction: Fraction = undefined): void {
+                inSourceMeasureCurrentFraction: Fraction, inSourceMeasurePreviousFraction: Fraction = undefined,
+                dirNodes: IXmlElement[] = directionNode.elements("direction-type")): void {
         let isTempoInstruction: boolean = false;
-        let isDynamicInstruction: boolean = false;
-        const n: IXmlElement = directionNode.element("sound");
+        const tempoExpressionCount: number = currentMeasure.TempoExpressions.length;
+
+        const timestampFraction: Fraction = inSourceMeasureCurrentFraction.clone();
+        const offsetNode: IXmlElement = directionNode.element("offset");
+        if (offsetNode?.value) {
+          const offsetValue: number = Number.parseInt(offsetNode.value, 10);
+          timestampFraction.Add(new Fraction(offsetValue, 4 * this.divisions));
+        }
+        const n: IXmlElement = directionNode.name === "sound" ? directionNode : directionNode.element("sound");
         if (n) {
             const tempoAttr: IXmlAttribute = n.attribute("tempo");
             const dynAttr: IXmlAttribute = n.attribute("dynamics");
             if (tempoAttr) {
-                // const match: string[] = tempoAttr.value.match(/^(\d+\.?\d{0,9}|\.\d{1,9})$/);
-                const match: string[] = tempoAttr.value.match(/^(\d+)(\.\d+)?$/);
-                if (match?.length > 0) {
-                    this.soundTempo = Math.round(Number.parseFloat(tempoAttr.value));
+                const tempo: number = ExpressionReader.readDecimal(tempoAttr.value);
+                if (Number.isFinite(tempo) && tempo >= 0) {
+                    this.soundTempo = tempo;
                 } else {
                     log.info("invalid xml tempo: " + tempoAttr.value);
                     this.soundTempo = 100;
                 }
                 //console.log(`value: ${tempoAttr.value}\n  soundTempo: ${this.soundTempo}`);
                 currentMeasure.TempoInBPM = this.soundTempo;
-                if (this.musicSheet.DefaultStartTempoInBpm === 0) {
-                    this.musicSheet.DefaultStartTempoInBpm = this.soundTempo;
-                }
                 this.musicSheet.HasBPMInfo = true;
                 isTempoInstruction = true;
+                this.explicitSoundTempo = this.soundTempo;
+                const soundOffset: IXmlElement = n.element("offset") ??
+                    (offsetNode?.attribute("sound")?.value === "yes" ? offsetNode : undefined);
+                this.soundTimestamp = this.readDirectionTimestamp(soundOffset, inSourceMeasureCurrentFraction);
             }
             if (dynAttr) {
                 const match: string[] = dynAttr.value.match(/\d+/);
                 this.soundDynamic = match !== undefined ? parseInt(match[0], 10) : 100;
-                isDynamicInstruction = true;
+                const soundOffset: IXmlElement = n.element("offset") ??
+                    (offsetNode?.attribute("sound")?.value === "yes" ? offsetNode : undefined);
+                this.soundDynamicTimestamp = this.readDirectionTimestamp(soundOffset, inSourceMeasureCurrentFraction);
             }
         }
-        const dirNode: IXmlElement = directionNode.element("direction-type");
-        if (!dirNode) {
-            return;
-        }
-        let dirContentNode: IXmlElement = dirNode.element("metronome");
-        if (dirContentNode) {
-            const beatUnit: IXmlElement = dirContentNode.element("beat-unit");
-            // TODO check second "beat-unit", e.g. quarter = half
-            const dotted: boolean = dirContentNode.element("beat-unit-dot") !== undefined;
-            const bpm: IXmlElement = dirContentNode.element("per-minute");
-            // TODO check print-object = false -> don't render invisible metronome mark
-            if (beatUnit !== undefined && bpm) {
-                const useCurrentFractionForPositioning: boolean = (dirContentNode.hasAttributes && dirContentNode.attribute("default-x") !== undefined);
-                if (useCurrentFractionForPositioning) {
-                    this.directionTimestamp = Fraction.createFromFraction(inSourceMeasureCurrentFraction);
+        const originalDirectionTimestamp: Fraction = this.directionTimestamp;
+        for (const dirNode of dirNodes) {
+            this.directionTimestamp = originalDirectionTimestamp;
+            let dirContentNode: IXmlElement = dirNode.element("metronome");
+            if (dirContentNode) {
+                this.directionTimestamp = this.readDirectionTimestamp(
+                    dirContentNode.attribute("default-x") ? undefined : offsetNode, inSourceMeasureCurrentFraction);
+                const metronomeNotes: IXmlElement[] = dirContentNode.elements("metronome-note");
+                const metronomeRelation: IXmlElement = dirContentNode.element("metronome-relation");
+
+                if (metronomeNotes.length > 0 && metronomeRelation) {
+                    // Complex metronome mark (note equation, e.g. swing notation)
+                    this.parseComplexMetronomeMark(dirContentNode, metronomeNotes, metronomeRelation,
+                                                   currentMeasure, timestampFraction);
+                } else if (!dirContentNode.element("per-minute") && dirContentNode.elements("beat-unit").length > 1) {
+                    // Note equation written with two beat units, e.g. quarter = dotted quarter (a metric modulation)
+                    this.parseBeatUnitNoteEquation(dirContentNode, currentMeasure, timestampFraction);
+                } else {
+                    // Simple metronome mark: beat-unit = BPM
+                    const beatUnit: IXmlElement = dirContentNode.element("beat-unit");
+                    const bpm: IXmlElement = dirContentNode.element("per-minute");
+                    if (beatUnit !== undefined && bpm) {
+                        // per-minute can contain text alongside the number (e.g. "c. 108" for circa)
+                        // -> find first number ("c. 108" matches 108, "108.5" would match 108.5)
+                        const bpmMatch: RegExpMatchArray = bpm.value.match(/(\d+\.?\d*)/);
+                        const bpmNumber: number = bpmMatch ? parseFloat(bpmMatch[1]) : NaN;
+                        this.createNewTempoExpressionIfNeeded(currentMeasure);
+                        const instantaneousTempoExpression: InstantaneousTempoExpression =
+                            new InstantaneousTempoExpression(undefined,
+                                                             this.placement,
+                                                             this.staffNumber,
+                                                             bpmNumber,
+                                                             this.currentMultiTempoExpression,
+                                                             true);
+                        instantaneousTempoExpression.parentMeasure = currentMeasure;
+                        instantaneousTempoExpression.beatUnit = beatUnit.value;
+                        instantaneousTempoExpression.dotCount = dirContentNode.elements("beat-unit-dot").length;
+                        this.soundTempo = bpmNumber;
+                        // measure.TempoInBPM drives playback and is expressed in quarter notes per minute.
+                        //   If this direction also carried a <sound tempo> (isTempoInstruction), that value is
+                        //   authoritative for playback and was already written to measure.TempoInBPM above, so
+                        //   keep it: this matches what MuseScore plays and respects files where the printed mark
+                        //   and the sounding tempo intentionally differ (e.g. "half = 144" with sound tempo 144).
+                        //   Otherwise derive the tempo from the metronome mark itself, converting its per-minute
+                        //   value via the beat unit: e.g. "half = 88" -> 176, "eighth = 120" -> 60 (a dotted beat
+                        //   unit is 1.5x as long). Either way the mark is still DISPLAYED with its original beat
+                        //   unit + per-minute via the InstantaneousTempoExpression, which keeps bpmNumber.
+                        if (!isTempoInstruction) {
+                            currentMeasure.TempoInBPM = instantaneousTempoExpression.TempoInQuarterNotesPerMinute;
+                        }
+                        this.musicSheet.HasBPMInfo = true;
+                        instantaneousTempoExpression.printObject = dirContentNode.attribute("print-object")?.value !== "no";
+                        this.currentMultiTempoExpression.addExpression(instantaneousTempoExpression, "");
+                        this.currentMultiTempoExpression.CombinedExpressionsText = "test";
+                    }
                 }
-                const bpmNumber: number = parseFloat(bpm.value);
-                this.createNewTempoExpressionIfNeeded(currentMeasure);
-                const instantaneousTempoExpression: InstantaneousTempoExpression =
-                    new InstantaneousTempoExpression(undefined,
-                                                     this.placement,
-                                                     this.staffNumber,
-                                                     bpmNumber,
-                                                     this.currentMultiTempoExpression,
-                                                     true);
-                instantaneousTempoExpression.parentMeasure = currentMeasure;
-                this.soundTempo = bpmNumber;
-                // make sure to take dotted beats into account
-                currentMeasure.TempoInBPM = this.soundTempo * (dotted?1.5:1);
-                if (this.musicSheet.DefaultStartTempoInBpm === 0) {
-                    this.musicSheet.DefaultStartTempoInBpm = this.soundTempo;
+                continue;
+            }
+
+            dirContentNode = dirNode.element("dynamics");
+            if (dirContentNode) {
+                // The offset also applies when the dynamics have a default-x: OSMD places them by their timestamp and doesn't
+                //   read default-x, and exporters write a default-x that matches the offset, e.g. Finale writes dynamics at
+                //   the start of the measure with the offset to their beat.
+                this.directionTimestamp = this.readDirectionTimestamp(offsetNode, inSourceMeasureCurrentFraction);
+                const fromNotation: boolean = directionNode.element("notations") !== undefined;
+                this.interpretInstantaneousDynamics(dirContentNode, currentMeasure, timestampFraction, fromNotation);
+                continue;
+            }
+
+            dirContentNode = dirNode.element("words");
+            if (dirContentNode) {
+                // an exporter may split the words where their formatting changes, and put a note symbol between them
+                const text: string = dirNode.elements().map((node: IXmlElement): string => node.name === "words" ? node.value :
+                    node.name === "symbol" ? ExpressionReader.noteSymbolTexts.get(node.value.trim().replace(/Down$/, "Up")) ?? "" : "").join("");
+                if (isTempoInstruction) {
+                    this.directionTimestamp = this.readDirectionTimestamp(
+                        dirContentNode.attribute("default-x") ? undefined : offsetNode, inSourceMeasureCurrentFraction);
+                    this.createNewTempoExpressionIfNeeded(currentMeasure);
+                    this.currentMultiTempoExpression.CombinedExpressionsText = text;
+                    const instantaneousTempoExpression: InstantaneousTempoExpression = new InstantaneousTempoExpression(
+                        text, this.placement, this.staffNumber, this.soundTempo, this.currentMultiTempoExpression);
+                    instantaneousTempoExpression.language = dirContentNode.attribute("xml:lang")?.value;
+                    this.currentMultiTempoExpression.addExpression(instantaneousTempoExpression, "");
+                } else {
+                    this.interpretWords(dirContentNode, text, currentMeasure, timestampFraction);
                 }
-                this.musicSheet.HasBPMInfo = true;
-                instantaneousTempoExpression.dotted = dotted;
-                instantaneousTempoExpression.beatUnit = beatUnit.value;
-                this.currentMultiTempoExpression.addExpression(instantaneousTempoExpression, "");
-                this.currentMultiTempoExpression.CombinedExpressionsText = "test";
+                continue;
             }
-            return;
-        }
 
-        dirContentNode = dirNode.element("dynamics");
-        if (dirContentNode) {
-            const fromNotation: boolean = directionNode.element("notations") !== undefined;
-            this.interpretInstantaneousDynamics(dirContentNode, currentMeasure, inSourceMeasureCurrentFraction, fromNotation);
-            return;
-        }
-
-        dirContentNode = dirNode.element("words");
-        if (dirContentNode) {
-            if (isTempoInstruction) {
-                this.createNewTempoExpressionIfNeeded(currentMeasure);
-                this.currentMultiTempoExpression.CombinedExpressionsText = dirContentNode.value;
-                const instantaneousTempoExpression: InstantaneousTempoExpression =
-                    new InstantaneousTempoExpression(dirContentNode.value, this.placement, this.staffNumber, this.soundTempo, this.currentMultiTempoExpression);
-                this.currentMultiTempoExpression.addExpression(instantaneousTempoExpression, "");
-            } else if (!isDynamicInstruction) {
-                this.interpretWords(dirContentNode, currentMeasure, inSourceMeasureCurrentFraction);
+            dirContentNode = dirNode.element("wedge");
+            if (dirContentNode) {
+                this.directionTimestamp = this.readDirectionTimestamp(offsetNode, inSourceMeasureCurrentFraction); // see dynamics
+                this.interpretWedge(directionNode, dirContentNode, currentMeasure, inSourceMeasurePreviousFraction, currentMeasure.MeasureNumber);
+                continue;
             }
-            return;
-        }
 
-        dirContentNode = dirNode.element("wedge");
-        if (dirContentNode) {
-            this.interpretWedge(dirContentNode, currentMeasure, inSourceMeasurePreviousFraction, currentMeasure.MeasureNumber);
-            return;
+            dirContentNode = dirNode.element("rehearsal");
+            if (dirContentNode) {
+                const text: string = dirNode.elements("rehearsal").map((rehearsalNode: IXmlElement): string => rehearsalNode.value).join("");
+                this.interpretRehearsalMark(text, currentMeasure, inSourceMeasureCurrentFraction, currentMeasure.MeasureNumber);
+                continue;
+            }
         }
-
-        dirContentNode = dirNode.element("rehearsal");
-        if (dirContentNode) {
-            this.interpretRehearsalMark(dirContentNode, currentMeasure, inSourceMeasureCurrentFraction, currentMeasure.MeasureNumber);
-            return;
+        if (this.explicitSoundTempo > 0 && currentMeasure.TempoExpressions.length === tempoExpressionCount) {
+            // no tempo text or metronome mark was read: the sound tempo changes playback without a printed tempo
+            this.directionTimestamp = this.soundTimestamp;
+            this.createNewTempoExpressionIfNeeded(currentMeasure);
         }
     }
     /** Usually called at end of last measure. */
@@ -273,7 +315,8 @@ export class ExpressionReader {
             this.closeOpenContinuousTempo(Fraction.plus(sourceMeasure.AbsoluteTimestamp, timestamp));
         }
     }
-    public addOctaveShift(directionNode: IXmlElement, currentMeasure: SourceMeasure, endTimestamp: Fraction): void {
+    public addOctaveShift(directionNode: IXmlElement, currentMeasure: SourceMeasure, endTimestamp: Fraction,
+                          endVoiceEntryCount: number = 0): void {
         let octaveStaffNumber: number = 1;
         const staffNode: IXmlElement = directionNode.element("staff");
         if (staffNode) {
@@ -287,10 +330,10 @@ export class ExpressionReader {
                 log.debug("ExpressionReader.addOctaveShift", errorMsg, ex);
             }
         }
-        const directionTypeNode: IXmlElement = directionNode.element("direction-type");
-        if (directionTypeNode) {
+        const directionTypeNodes: IXmlElement[] = directionNode.elements("direction-type");
+        const placement: PlacementEnum = this.readPlacement(directionNode);
+        for (const directionTypeNode of directionTypeNodes) {
             const octaveShiftNode: IXmlElement = directionTypeNode.element("octave-shift");
-            const placement: PlacementEnum = this.readPlacement(directionNode);
             // if (placement === PlacementEnum.NotYetDefined && this.staffNumber === 1) {
             //     placement = PlacementEnum.Above;
             // }
@@ -316,19 +359,45 @@ export class ExpressionReader {
                         if (type === "up" || type === "down") { // unfortunately not always given in MusicXML (e.g. Musescore 3.6.2) even though required
                             const octaveShift: OctaveShift = new OctaveShift(type, octave);
                             octaveShift.StaffNumber = octaveStaffNumber;
+                            octaveShift.numberXml = numberXml;
                             this.getMultiExpression = this.createNewMultiExpressionIfNeeded(
                                 currentMeasure, numberXml);
                             this.getMultiExpression.OctaveShiftStart = octaveShift;
                             octaveShift.ParentStartMultiExpression = this.getMultiExpression;
-                            this.openOctaveShift = octaveShift;
-                        } else if (type === "stop") {
-                            if (this.openOctaveShift) {
+                            this.openOctaveShifts.set(numberXml, octaveShift);
+                            // Check if the matching stop was already encountered (stop before start due to voice/backup ordering)
+                            const pendingStop: {measure: SourceMeasure, endTimestamp: Fraction} =
+                                this.pendingOctaveShiftStops.get(numberXml);
+                            if (pendingStop) {
+                                this.pendingOctaveShiftStops.delete(numberXml);
                                 this.getMultiExpression = this.createNewMultiExpressionIfNeeded(
-                                    currentMeasure, this.openOctaveShift.numberXml, endTimestamp);
+                                    pendingStop.measure, numberXml, pendingStop.endTimestamp);
+                                this.getMultiExpression.OctaveShiftEnd = octaveShift;
+                                octaveShift.ParentEndMultiExpression = this.getMultiExpression;
+                                this.openOctaveShifts.delete(numberXml);
+                            }
+                        } else if (type === "stop") {
+                            const matchingShift: OctaveShift = this.openOctaveShifts.get(numberXml);
+                            if (matchingShift) {
+                                matchingShift.endVoiceEntryIndex = endVoiceEntryCount;
+                                this.getMultiExpression = this.createNewMultiExpressionIfNeeded(
+                                    currentMeasure, matchingShift.numberXml, endTimestamp);
                                 const octaveShiftStartExpression: MultiExpression = this.getMultiExpression;
-                                octaveShiftStartExpression.OctaveShiftEnd = this.openOctaveShift;
-                                this.openOctaveShift.ParentEndMultiExpression = this.getMultiExpression;
-                                this.openOctaveShift = undefined;
+                                octaveShiftStartExpression.OctaveShiftEnd = matchingShift;
+                                matchingShift.ParentEndMultiExpression = this.getMultiExpression;
+                                this.openOctaveShifts.delete(numberXml);
+                            } else {
+                                // Stop arrived before its matching start (e.g. due to voice/backup ordering in MusicXML).
+                                // Store it so it can be matched when the start is encountered later.
+                                // Use directionTimestamp stepped back by one division to get an inclusive end (notes at end timestamp are included),
+                                // since directionTimestamp (= currentFraction) is an exclusive boundary and
+                                // endTimestamp (= previousFraction) refers to the wrong voice's timeline.
+                                const inclusiveEnd: Fraction = Fraction.minus(
+                                    this.directionTimestamp, new Fraction(1, 4 * this.divisions));
+                                this.pendingOctaveShiftStops.set(numberXml, {
+                                    measure: currentMeasure,
+                                    endTimestamp: inclusiveEnd
+                                });
                             }
                         } // TODO handle type === "continue"?
                         else if (!type) {
@@ -344,14 +413,17 @@ export class ExpressionReader {
         }
     }
     public addPedalMarking(directionNode: IXmlElement, currentMeasure: SourceMeasure, endTimestamp: Fraction): void {
-        const directionTypeNode: IXmlElement = directionNode.element("direction-type");
-        if (directionTypeNode) {
+        const directionTypeNodes: IXmlElement[] = directionNode.elements("direction-type");
+        for (const directionTypeNode of directionTypeNodes) {
             const pedalNode: IXmlElement = directionTypeNode.element("pedal");
-            if (pedalNode !== undefined && pedalNode.hasAttributes) {
+            if (!pedalNode) { continue; }
+            if (pedalNode.hasAttributes) {
                 let sign: boolean = false, line: boolean = false;
                 try {
                     if (pedalNode.attribute("line")?.value === "yes") {
                         line = true;
+                        // sign="yes": the Ped. sign, then the line (MusicXML: with a line, the sign is no by default)
+                        sign = pedalNode.attribute("sign")?.value === "yes";
                     } else if (pedalNode.attribute("line")?.value === "no"){
                         line = false;
                         //No line implies sign
@@ -363,8 +435,10 @@ export class ExpressionReader {
                         sign = false;
                         line = true;
                     }
-                    switch (pedalNode.attribute("type").value) {
+                    const pedalType: string = pedalNode.attribute("type").value;
+                    switch (pedalType) {
                         case "start":
+                        case "resume": // a line without the start hook, e.g. after the Ped. sign (MuseScore 4.2-4.7.1's Ped. + line pedal)
                             //ignore duplicate tags (causes issues when pedals aren't terminated)
                             // if (!this.openPedal || !this.openPedal.ParentStartMultiExpression.AbsoluteTimestamp.Equals(endTimestamp)) {
                             //     this.createNewMultiExpressionIfNeeded(currentMeasure, -1);
@@ -376,11 +450,21 @@ export class ExpressionReader {
                             }
                             this.createNewMultiExpressionIfNeeded(currentMeasure, -1);
                             this.openPedal = new Pedal(line, sign);
+                            this.openPedal.BeginsWithoutHook = pedalType === "resume";
                             this.getMultiExpression.PedalStart = this.openPedal;
                             this.openPedal.ParentStartMultiExpression = this.getMultiExpression;
+                            const releasedPedal: Pedal = this.getMultiExpression.PedalEnd;
+                            if (releasedPedal && this.openPedal.IsSign) {
+                                // released and pressed again at one note (a stop and a start at one timestamp) with the Ped. sign: a
+                                //   pedal change, drawn as * Ped. or as the end of a pedal line, then Ped. (left of the Ped. sign)
+                                releasedPedal.ChangeEnd = true;
+                                this.openPedal.ChangeBegin = true;
+                            }
                         break;
                         case "stop":
+                        case "discontinue": // a line end without the end hook
                             if (this.openPedal) {
+                                this.openPedal.EndsWithoutHook = pedalType === "discontinue";
                                 this.endOpenPedal(currentMeasure, endTimestamp);
                             }
                         break;
@@ -419,10 +503,44 @@ export class ExpressionReader {
         this.openPedal.ParentEndMultiExpression = this.getMultiExpression;
         this.openPedal = undefined;
     }
+    public addWavyLine(wavyLineNode: IXmlElement, currentMeasure: SourceMeasure, currentTimestamp: Fraction, previousTimestamp: Fraction): void {
+        if (wavyLineNode && wavyLineNode.hasAttributes) {
+            try {
+                switch (wavyLineNode.attribute("type").value) {
+                    case "start":
+                        this.createNewMultiExpressionIfNeeded(currentMeasure, -1);
+                        this.openWavyLine = new WavyLine(this.placement);
+                        this.getMultiExpression.WavyLineStart = this.openWavyLine;
+                        this.openWavyLine.ParentStartMultiExpression = this.getMultiExpression;
+                    break;
+                    case "stop":
+                        if (this.openWavyLine) {
+                            this.createNewMultiExpressionIfNeeded(currentMeasure, -1, currentTimestamp);
+                            this.getMultiExpression.WavyLineEnd = this.openWavyLine;
+                            this.openWavyLine.ParentEndMultiExpression = this.getMultiExpression;
+                            this.openWavyLine = undefined;
+                        }
+                    break;
+                    case "continue":
+                        //Seems we can ignore this for now. TODO: Look into when this is a barline child
+                    break;
+                    default:
+                    break;
+                }
+            } catch (ex) {
+                const errorMsg: string = ITextTranslation.translateText("ReaderErrorMessages/WavyLineError", "Error while reading wavy-line.");
+                this.musicSheet.SheetErrors.pushMeasureError(errorMsg);
+                log.debug("ExpressionReader.addWavyLine", errorMsg, ex);
+            }
+        }
+    }
     private initialize(): void {
         this.placement = PlacementEnum.NotYetDefined;
         this.soundTempo = 0;
+        this.soundTimestamp = undefined;
+        this.explicitSoundTempo = undefined;
         this.soundDynamic = 0;
+        this.soundDynamicTimestamp = undefined;
         this.offsetDivisions = 0;
     }
     private readPlacement(node: IXmlElement): PlacementEnum {
@@ -460,68 +578,215 @@ export class ExpressionReader {
             log.debug("ExpressionReader.readExpressionParameters", ex);
         }
     }
+    /** Parse a complex metronome mark with metronome-note elements and a metronome-relation (e.g. swing notation). */
+    private parseComplexMetronomeMark(metronomeNode: IXmlElement, metronomeNotes: IXmlElement[],
+                                      metronomeRelationNode: IXmlElement,
+                                      currentMeasure: SourceMeasure, timestampFraction: Fraction): void {
+        // Split metronome-note elements into left and right groups, divided by metronome-relation.
+        // We iterate the raw children to determine ordering.
+        const allChildren: IXmlElement[] = metronomeNode.elements();
+        const leftNotes: MetronomeNote[] = [];
+        const rightNotes: MetronomeNote[] = [];
+        let leftTuplet: MetronomeTuplet | undefined;
+        let rightTuplet: MetronomeTuplet | undefined;
+        let passedRelation: boolean = false;
+        let tieStarted: boolean = false;
+
+        for (const child of allChildren) {
+            if (child.name === "metronome-relation") {
+                passedRelation = true;
+                tieStarted = false;
+                continue;
+            }
+            if (child.name !== "metronome-note") {
+                continue;
+            }
+            const typeEl: IXmlElement = child.element("metronome-type");
+            if (!typeEl) {
+                continue;
+            }
+            const note: MetronomeNote = {
+                type: typeEl.value,
+                dots: child.elements("metronome-dot").length,
+            };
+            const beamEl: IXmlElement = child.element("metronome-beam");
+            if (beamEl) {
+                note.beam = beamEl.value; // "begin", "continue", "end"
+            }
+            // Tied to the preceding note if this tie stops or the preceding one starts: a note has only one
+            //   metronome-tied, so the middle note of a chain has either.
+            const tiedType: string = child.element("metronome-tied")?.attribute("type")?.value;
+            if (tiedType === "stop" || tieStarted) {
+                note.tied = true;
+            }
+            tieStarted = tiedType === "start";
+
+            // Parse tuplet start/stop
+            const tupletEl: IXmlElement = child.element("metronome-tuplet");
+            if (tupletEl) {
+                const tupletType: string = tupletEl.hasAttributes ? tupletEl.attribute("type")?.value : undefined;
+                if (tupletType === "start") {
+                    const actualEl: IXmlElement = tupletEl.element("actual-notes");
+                    const normalEl: IXmlElement = tupletEl.element("normal-notes");
+                    const bracketAttr: IXmlAttribute = tupletEl.attribute("bracket");
+                    const showNumberAttr: IXmlAttribute = tupletEl.attribute("show-number");
+                    const tuplet: MetronomeTuplet = {
+                        actualNotes: actualEl ? parseInt(actualEl.value, 10) : 3,
+                        normalNotes: normalEl ? parseInt(normalEl.value, 10) : 2,
+                        bracket: bracketAttr ? bracketAttr.value === "yes" : true,
+                        showNumber: showNumberAttr ? showNumberAttr.value : "actual",
+                    };
+                    // the tuplet belongs to the side it starts on, e.g. the right side of a swing mark
+                    if (passedRelation) {
+                        rightTuplet = tuplet;
+                    } else {
+                        leftTuplet = tuplet;
+                    }
+                }
+                // tupletType === "stop" — tuplet ends on this note, handled below
+            }
+
+            if (passedRelation) {
+                rightNotes.push(note);
+            } else {
+                leftNotes.push(note);
+            }
+        }
+
+        // Build note groups
+        const leftGroup: MetronomeNoteGroup = { notes: leftNotes, tuplet: leftTuplet };
+        const rightGroup: MetronomeNoteGroup = { notes: rightNotes, tuplet: rightTuplet };
+        this.addNoteEquation(metronomeNode, leftGroup, rightGroup, metronomeRelationNode.value, currentMeasure, timestampFraction);
+    }
+
+    /** Parse a note equation written with two beat units instead of metronome-note elements, e.g. quarter = dotted quarter
+     *  (MusicXML's simpler form of a metric modulation). The first beat unit, with its dots and tied beat units, is the left
+     *  side, the second one the right side.
+     */
+    private parseBeatUnitNoteEquation(metronomeNode: IXmlElement, currentMeasure: SourceMeasure, timestampFraction: Fraction): void {
+        const leftNotes: MetronomeNote[] = [];
+        const rightNotes: MetronomeNote[] = [];
+        let notes: MetronomeNote[] = leftNotes;
+        for (const child of metronomeNode.elements()) {
+            if (child.name === "beat-unit") {
+                if (leftNotes.length > 0) {
+                    notes = rightNotes; // the second beat unit starts the right side
+                }
+                notes.push({ type: child.value, dots: 0 });
+            } else if (child.name === "beat-unit-dot" && notes.length > 0) {
+                notes[notes.length - 1].dots++;
+            } else if (child.name === "beat-unit-tied" && child.element("beat-unit")) {
+                notes.push({ type: child.element("beat-unit").value, dots: child.elements("beat-unit-dot").length, tied: true });
+            }
+        }
+        this.addNoteEquation(metronomeNode, { notes: leftNotes }, { notes: rightNotes }, "equals", currentMeasure, timestampFraction);
+    }
+
+    /** Add a note equation (e.g. a swing mark or a metric modulation) as a metronome mark. Its BPM is the direction's
+     *  sound tempo, or 0, which TemposCalculator replaces with the tempo in force times the equation's tempo factor.
+     */
+    private addNoteEquation(metronomeNode: IXmlElement, leftGroup: MetronomeNoteGroup, rightGroup: MetronomeNoteGroup,
+                            relation: string, currentMeasure: SourceMeasure, timestampFraction: Fraction): void {
+        const useCurrentFractionForPositioning: boolean =
+            (metronomeNode.hasAttributes && metronomeNode.attribute("default-x") !== undefined);
+        if (useCurrentFractionForPositioning) {
+            this.directionTimestamp = Fraction.createFromFraction(timestampFraction);
+        }
+
+        // Create the tempo expression. Use the sound tempo from the parent <sound> element.
+        this.createNewTempoExpressionIfNeeded(currentMeasure);
+        const instantaneousTempoExpression: InstantaneousTempoExpression =
+            new InstantaneousTempoExpression(undefined,
+                                             this.placement,
+                                             this.staffNumber,
+                                             this.soundTempo,
+                                             this.currentMultiTempoExpression,
+                                             true);
+        instantaneousTempoExpression.parentMeasure = currentMeasure;
+        instantaneousTempoExpression.metronomeNoteGroupLeft = leftGroup;
+        instantaneousTempoExpression.metronomeNoteGroupRight = rightGroup;
+        instantaneousTempoExpression.metronomeRelation = relation;
+        instantaneousTempoExpression.printObject = metronomeNode.attribute("print-object")?.value !== "no";
+
+        this.musicSheet.HasBPMInfo = true;
+        this.currentMultiTempoExpression.addExpression(instantaneousTempoExpression, "");
+        this.currentMultiTempoExpression.CombinedExpressionsText = "test";
+    }
+
     private interpretInstantaneousDynamics(dynamicsNode: IXmlElement,
                                            currentMeasure: SourceMeasure,
                                            inSourceMeasureCurrentFraction: Fraction,
                                            fromNotation: boolean): void {
         if (dynamicsNode.hasElements) {
-            if (dynamicsNode.hasAttributes && dynamicsNode.attribute("default-x")) {
-                this.directionTimestamp = Fraction.createFromFraction(inSourceMeasureCurrentFraction);
-            }
             const numberXml: number = this.readNumber(dynamicsNode); // probably never given, just to comply with createExpressionIfNeeded()
-            let expressionText: string = dynamicsNode.elements()[0]?.name; // elements can in rare cases still be empty even though hasElements=true, see #1269
-            if (expressionText === "other-dynamics") {
-                expressionText = dynamicsNode.elements()[0].value;
-            }
+            const dynamicsElements: IXmlElement[] = dynamicsNode.elements();
+            // A single <dynamics> element may contain multiple symbols, e.g. <sf/><mp/>.
+            const expressionText: string = dynamicsElements
+                .map((element: IXmlElement): string => element.name === "other-dynamics" ? element.value : element.name)
+                .join("")
+                .trim(); // e.g. Finale writes <other-dynamics> marcato</other-dynamics> with a leading space
             if (expressionText) {
+                // The playback dynamic of the marking: sf for <sf/><mp/> (sfmp) as well as for the same marking spelled
+                //   letter by letter, ff for <other-dynamics>ffz</other-dynamics>, f for "f con fuoco", none for "cresc.".
+                const dynamicEnum: DynamicEnum = InstantaneousDynamicExpression.dynamicEnumFromText(expressionText);
                 // ToDo: make duplicate recognition an afterReadingModule, as we can't definitively check here if there is a repetition:
                 // Compare with the active dynamic expression and only add it if there is a change in dynamic
                 // Exception is when a repetition starts here, where the "repeated" dynamic might be desired.
                 // see PR #767 where this was removed
                 if (currentMeasure.Rules?.IgnoreRepeatedDynamics) {
-                    let dynamicEnum: DynamicEnum;
-                    try {
-                        dynamicEnum = DynamicEnum[expressionText];
-                    } catch (err) {
-                        const errorMsg: string = ITextTranslation.translateText("ReaderErrorMessages/DynamicError", "Error while reading dynamic.");
-                        this.musicSheet.SheetErrors.pushMeasureError(errorMsg);
-                        return;
-                    }
-                    if (this.activeInstantaneousDynamic?.DynEnum === dynamicEnum) {
+                    // Compare the whole marking, not just its playback enum (the first symbol of a combined marking):
+                    //   <sf/><p/> right after <sf/><mp/> is a different marking, not a repeated sf.
+                    if (this.activeInstantaneousDynamic?.DynamicExpression?.toLowerCase() === expressionText.toLowerCase()) {
                         // repeated dynamic
                         return;
                     }
                 }
                 if (!fromNotation) {
-                    this.createNewMultiExpressionIfNeeded(currentMeasure, numberXml);
+                    this.createNewMultiExpressionIfNeeded(currentMeasure, numberXml, undefined, this.soundDynamicTimestamp);
                 } else {
                     this.createNewMultiExpressionIfNeeded(currentMeasure, numberXml,
                         Fraction.createFromFraction(inSourceMeasureCurrentFraction));
                 }
+                // A second dynamic at the same position on the same staff, e.g. Finale's "ff marcato" written as <ff/> plus
+                //   <other-dynamics>marcato</other-dynamics> in two <direction>s: the MultiExpression holds only one
+                //   instantaneous dynamic, so combine both into one marking instead of losing the first one.
+                const existingDynamic: InstantaneousDynamicExpression = this.getMultiExpression.InstantaneousDynamic;
+                let markingText: string = expressionText;
+                let markingEnum: DynamicEnum = dynamicEnum;
+                if (existingDynamic && existingDynamic.StaffNumber === this.staffNumber &&
+                    existingDynamic.DynamicExpression.toLowerCase() !== expressionText.toLowerCase()) {
+                    markingText = existingDynamic.DynamicExpression + " " + expressionText;
+                    markingEnum = existingDynamic.DynEnum ?? dynamicEnum; // the playback dynamic of "ff marcato" is the ff
+                }
                 const instantaneousDynamicExpression: InstantaneousDynamicExpression =
                     new InstantaneousDynamicExpression(
-                        expressionText,
+                        markingText,
                         this.soundDynamic,
                         this.placement,
                         this.staffNumber,
-                        currentMeasure);
+                        currentMeasure,
+                        markingEnum);
                 instantaneousDynamicExpression.InMeasureTimestamp = inSourceMeasureCurrentFraction.clone();
+                instantaneousDynamicExpression.YPositionXml = ExpressionReader.readYPositionXml(dynamicsNode);
                 this.getMultiExpression.addExpression(instantaneousDynamicExpression, "");
                 // addExpression unnecessary now?:
                 //const multiExpression = this.getMultiExpression(ExpressionType.InstantaneousDynamic, numberXml);
                 //multiExpression.addExpression(instantaneousDynamicExpression, "");
-                this.initialize();
+                //this.initialize(); this is unnecessary, also done at the beginning of readExpressionParameters().
+                //  initialize also resets this.placement to NotYetDefined, would be an issue for multiple direction-type nodes in one direction node.
                 if (this.activeInstantaneousDynamic) {
                     this.activeInstantaneousDynamic.DynEnum = instantaneousDynamicExpression.DynEnum;
+                    this.activeInstantaneousDynamic.DynamicExpression = instantaneousDynamicExpression.DynamicExpression;
                 } else {
-                    this.activeInstantaneousDynamic = new InstantaneousDynamicExpression(expressionText, 0, PlacementEnum.NotYetDefined, 1, currentMeasure);
+                    this.activeInstantaneousDynamic = new InstantaneousDynamicExpression(instantaneousDynamicExpression.DynamicExpression, 0,
+                                                                                         PlacementEnum.NotYetDefined, 1, currentMeasure,
+                                                                                         instantaneousDynamicExpression.DynEnum);
                 }
                 //}
             }
         }
     }
-    private interpretWords(wordsNode: IXmlElement, currentMeasure: SourceMeasure, inSourceMeasureCurrentFraction: Fraction): void {
-        const text: string = wordsNode.value;
+    private interpretWords(wordsNode: IXmlElement, text: string, currentMeasure: SourceMeasure, inSourceMeasureCurrentFraction: Fraction): void {
         if (currentMeasure.Rules.IgnoreBracketsWords && (
             /^\(\s*\)$/.test(text) || /^\[\s*\]$/.test(text) // (*) and [*]
         )) { // regex: brackets with arbitrary white space in-between
@@ -529,12 +794,30 @@ export class ExpressionReader {
         }
         let fontStyle: FontStyles;
         const fontStyleAttr: Attr = wordsNode.attribute("font-style");
+        let fontStyleText: string;
+        let fontWeightText: string;
+        let fontColor: string;
         if (fontStyleAttr) {
-            const fontStyleText: string = fontStyleAttr.value;
+            fontStyleText = fontStyleAttr.value;
             if (fontStyleText === "italic") {
                 fontStyle = FontStyles.Italic;
             }
         }
+        const fontWeightAttr: Attr = wordsNode.attribute("font-weight");
+        if (fontWeightAttr) {
+            fontWeightText = fontWeightAttr.value;
+            if (fontWeightText === "bold") {
+                fontStyle = FontStyles.Bold;
+                if (fontStyleText === "italic") {
+                    fontStyle = FontStyles.BoldItalic;
+                }
+            }
+        }
+        const colorAttr: Attr = wordsNode.attribute("color");
+        if (colorAttr) {
+            fontColor = musicXmlColorToCss(colorAttr.value, this.musicSheet.XmlColorAlphaLast);
+        }
+        const language: string = wordsNode.attribute("xml:lang")?.value;
         let defaultYXml: number;
         if (currentMeasure.Rules.PlaceWordsInsideStafflineFromXml) {
             const defaultYString: string = wordsNode.attribute("default-y")?.value;
@@ -543,14 +826,13 @@ export class ExpressionReader {
             }
         }
         if (text.length > 0) {
-            if (wordsNode.hasAttributes && wordsNode.attribute("default-x")) {
-                this.directionTimestamp = Fraction.createFromFraction(inSourceMeasureCurrentFraction);
-            }
+            // The caller has already added the divisions offset, also for words without default-x.
+            this.directionTimestamp = Fraction.createFromFraction(inSourceMeasureCurrentFraction);
             if (this.checkIfWordsNodeIsRepetitionInstruction(text)) {
                 return;
             }
-            this.fillMultiOrTempoExpression(text, currentMeasure, inSourceMeasureCurrentFraction, fontStyle, defaultYXml);
-            this.initialize();
+            this.fillMultiOrTempoExpression(text, currentMeasure, inSourceMeasureCurrentFraction, fontStyle, fontColor, defaultYXml, language,
+                                            ExpressionReader.readYPositionXml(wordsNode));
         }
     }
     private readNumber(node: IXmlElement): number {
@@ -561,10 +843,8 @@ export class ExpressionReader {
         }
         return numberXml;
     }
-    private interpretWedge(wedgeNode: IXmlElement, currentMeasure: SourceMeasure, inSourceMeasureCurrentFraction: Fraction, currentMeasureIndex: number): void {
-        if (wedgeNode !== undefined && wedgeNode.hasAttributes && wedgeNode.attribute("default-x")) {
-            this.directionTimestamp = Fraction.createFromFraction(inSourceMeasureCurrentFraction);
-        }
+    private interpretWedge(directionNode: IXmlElement, wedgeNode: IXmlElement,
+        currentMeasure: SourceMeasure, inSourceMeasureCurrentFraction: Fraction, currentMeasureIndex: number): void {
         const wedgeNumberXml: number = this.readNumber(wedgeNode);
 
         const typeAttributeString: string = wedgeNode.attribute("type")?.value?.toLowerCase();
@@ -576,6 +856,8 @@ export class ExpressionReader {
                 this.WedgeYPosXml !== undefined &&
                 this.lastWedge.YPosXml === this.WedgeYPosXml &&
                 this.lastWedge.StartMultiExpression.Timestamp.Equals(this.directionTimestamp) &&
+                (this.lastWedge.StartMultiExpression.PlaybackTimestamp ?? this.lastWedge.StartMultiExpression.Timestamp)
+                    .Equals(this.soundDynamicTimestamp ?? this.directionTimestamp) &&
                 this.lastWedge.DynamicType === ContDynamicEnum[typeAttributeString]
 
         ) {
@@ -586,20 +868,20 @@ export class ExpressionReader {
         //If current is used, when there is a system break it will mess up
         if (typeAttributeString === "stop") {
             this.createNewMultiExpressionIfNeeded(currentMeasure, wedgeNumberXml, inSourceMeasureCurrentFraction);
+            this.getMultiExpression.EndOffsetFraction = new Fraction(this.offsetDivisions, this.divisions * 4);
         } else {
-            this.createNewMultiExpressionIfNeeded(currentMeasure, wedgeNumberXml);
+            this.createNewMultiExpressionIfNeeded(currentMeasure, wedgeNumberXml, undefined, this.soundDynamicTimestamp);
         }
         this.addWedge(wedgeNode, currentMeasure, inSourceMeasureCurrentFraction);
-        this.initialize();
     }
     private interpretRehearsalMark(
-        rehearsalNode: IXmlElement, currentMeasure: SourceMeasure,
+        text: string, currentMeasure: SourceMeasure,
         inSourceMeasureCurrentFraction: Fraction, currentMeasureIndex: number): void {
         // TODO create multi expression? for now we just need to have a static rehearsal mark though.
-        currentMeasure.rehearsalExpression = new RehearsalExpression(rehearsalNode.value, this.placement);
+        currentMeasure.rehearsalExpression = new RehearsalExpression(text, this.placement);
     }
     private createNewMultiExpressionIfNeeded(currentMeasure: SourceMeasure, numberXml: number,
-        timestamp: Fraction = undefined): MultiExpression {
+        timestamp: Fraction = undefined, playbackTimestamp: Fraction = undefined): MultiExpression {
         if (!timestamp) {
             timestamp = this.directionTimestamp;
         }
@@ -608,11 +890,47 @@ export class ExpressionReader {
             existingMultiExpression &&
             (existingMultiExpression.SourceMeasureParent !== currentMeasure ||
                 existingMultiExpression.numberXml !== numberXml ||
-                (existingMultiExpression.SourceMeasureParent === currentMeasure && existingMultiExpression.Timestamp !== timestamp))) {
+                !existingMultiExpression.Timestamp.Equals(timestamp) ||
+                !(existingMultiExpression.PlaybackTimestamp ?? existingMultiExpression.Timestamp).Equals(playbackTimestamp ?? timestamp))) {
                     this.getMultiExpression = existingMultiExpression = new MultiExpression(currentMeasure, Fraction.createFromFraction(timestamp));
+                    this.getMultiExpression.numberXml = numberXml;
+                    this.getMultiExpression.PlaybackTimestamp = playbackTimestamp?.clone();
             currentMeasure.StaffLinkedExpressions[this.globalStaffIndex].push(existingMultiExpression);
         }
         return existingMultiExpression;
+    }
+
+    private readDirectionTimestamp(offset: IXmlElement, sourceTimestamp: Fraction): Fraction {
+        const timestamp: Fraction = sourceTimestamp.clone();
+        if (offset) {
+            const divisions: number = ExpressionReader.readDecimal(offset.value);
+            if (Number.isFinite(divisions)) {
+                timestamp.Add(new Fraction(divisions, 4 * this.divisions));
+            }
+        }
+        return timestamp;
+    }
+
+    /** Returns the number of a MusicXML decimal, e.g. of an `<offset>` or a `<sound tempo>`: an optional sign and digits
+     *  with an optional decimal point, e.g. "142.5", "-0.5", "+120." or ".5", with or without surrounding XML whitespace
+     *  (spaces, tabs, line breaks). Returns NaN for any other text, e.g. "1e3", "120,5" or "", and an infinite number for
+     *  a decimal too large for a number.
+     */
+    private static readDecimal(text: string): number {
+        const decimal: string = text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+        return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(decimal) ? Number(decimal) : NaN;
+    }
+
+    /** The vertical position a `<words>` or `<dynamics>` element gives, in tenths of a staff space (see
+     *  AbstractExpression.YPositionXml): its default-y plus its relative-y, or undefined without a default-y (a relative-y
+     *  alone is relative to a position the file doesn't give). */
+    private static readYPositionXml(node: IXmlElement): number {
+        const defaultY: number = ExpressionReader.readDecimal(node.attribute("default-y")?.value ?? "");
+        if (!Number.isFinite(defaultY)) {
+            return undefined;
+        }
+        const relativeY: number = ExpressionReader.readDecimal(node.attribute("relative-y")?.value ?? "");
+        return defaultY + (Number.isFinite(relativeY) ? relativeY : 0);
     }
 
     private createNewTempoExpressionIfNeeded(currentMeasure: SourceMeasure): void {
@@ -620,6 +938,8 @@ export class ExpressionReader {
             this.currentMultiTempoExpression.SourceMeasureParent !== currentMeasure ||
             this.currentMultiTempoExpression.Timestamp !== this.directionTimestamp) {
             this.currentMultiTempoExpression = new MultiTempoExpression(currentMeasure, Fraction.createFromFraction(this.directionTimestamp));
+            this.currentMultiTempoExpression.PlaybackTimestamp = this.soundTimestamp?.clone();
+            this.currentMultiTempoExpression.PlaybackTempoInBpm = this.explicitSoundTempo;
             currentMeasure.TempoExpressions.push(this.currentMultiTempoExpression);
         }
     }
@@ -652,9 +972,8 @@ export class ExpressionReader {
                 } else if (type === "stop") {
                     for (const openCont of this.openContinuousDynamicExpressions) {
                         if (openCont.NumberXml === numberXml) {
-                            if (openCont.NumberXml === numberXml) {
-                                this.closeOpenContinuousDynamic(openCont, currentMeasure, inSourceMeasureCurrentFraction);
-                            }
+                            // if (openCont.NumberXml === numberXml) { // was there supposed to be another check here? someone wrote the same check twice.
+                            this.closeOpenContinuousDynamic(openCont, currentMeasure, inSourceMeasureCurrentFraction);
                         }
                     }
                 }
@@ -666,7 +985,8 @@ export class ExpressionReader {
         }
     }
     private fillMultiOrTempoExpression(inputString: string, currentMeasure: SourceMeasure, inSourceMeasureCurrentFraction: Fraction,
-        fontStyle: FontStyles, defaultYXml: number = undefined): void {
+        fontStyle: FontStyles, fontColor: string, defaultYXml: number = undefined, language: string = undefined,
+        yPositionXml: number = undefined): void {
         if (!inputString) {
             return;
         }
@@ -675,7 +995,8 @@ export class ExpressionReader {
         //const splitStrings: string[] = tmpInputString.split(/([\s,\r\n]and[\s,\r\n]|[\s,\r\n]und[\s,\r\n]|[\s,\r\n]e[\s,\r\n]|[\s,\r\n])+/g);
 
         //for (const splitStr of splitStrings) {
-        this.createExpressionFromString("", tmpInputString, currentMeasure, inSourceMeasureCurrentFraction, inputString, fontStyle, defaultYXml);
+        this.createExpressionFromString("", tmpInputString, currentMeasure, inSourceMeasureCurrentFraction, inputString, fontStyle, fontColor,
+                                        defaultYXml, language, yPositionXml);
         //}
     }
     /*
@@ -709,9 +1030,13 @@ export class ExpressionReader {
     private createExpressionFromString(prefix: string, stringTrimmed: string,
                                        currentMeasure: SourceMeasure, inSourceMeasureCurrentFraction, inputString: string,
                                        fontStyle: FontStyles,
-                                       defaultYXml: number = undefined): boolean {
-        if (InstantaneousTempoExpression.isInputStringInstantaneousTempo(stringTrimmed) ||
-            ContinuousTempoExpression.isInputStringContinuousTempo(stringTrimmed)) {
+                                       fontColor: string,
+                                       defaultYXml: number = undefined,
+                                       language: string = undefined,
+                                       yPositionXml: number = undefined): boolean {
+        const isInstantaneousTempo: boolean = InstantaneousTempoExpression.isInputStringInstantaneousTempo(stringTrimmed);
+        const isContinuousTempo: boolean = ContinuousTempoExpression.isInputStringContinuousTempo(stringTrimmed);
+        if (isInstantaneousTempo || isContinuousTempo) {
             // first check if there is already a tempo expression with the same function
             if (currentMeasure.TempoExpressions.length > 0) {
                 for (let idx: number = 0, len: number = currentMeasure.TempoExpressions.length; idx < len; ++idx) {
@@ -725,21 +1050,25 @@ export class ExpressionReader {
             }
             this.createNewTempoExpressionIfNeeded(currentMeasure); // TODO process fontStyle? (also for other expressions)
             this.currentMultiTempoExpression.CombinedExpressionsText = inputString;
-            if (InstantaneousTempoExpression.isInputStringInstantaneousTempo(stringTrimmed)) {
+            if (isInstantaneousTempo) {
                 const instantaneousTempoExpression: InstantaneousTempoExpression = new InstantaneousTempoExpression(  stringTrimmed,
                                                                                                                       this.placement,
                                                                                                                       this.staffNumber,
                                                                                                                       this.soundTempo,
                                                                                                                       this.currentMultiTempoExpression);
+                instantaneousTempoExpression.ColorXML = fontColor;
+                instantaneousTempoExpression.language = language;
                 this.currentMultiTempoExpression.addExpression(instantaneousTempoExpression, prefix);
                 return true;
             }
-            if (ContinuousTempoExpression.isInputStringContinuousTempo(stringTrimmed)) {
+            if (isContinuousTempo) {
                 const continuousTempoExpression: ContinuousTempoExpression = new ContinuousTempoExpression(
                     stringTrimmed,
                     this.placement,
                     this.staffNumber,
                     this.currentMultiTempoExpression);
+                continuousTempoExpression.ColorXML = fontColor;
+                continuousTempoExpression.language = language;
                 this.currentMultiTempoExpression.addExpression(continuousTempoExpression, prefix);
                 return true;
             }
@@ -770,6 +1099,8 @@ export class ExpressionReader {
                     currentMeasure,
                     -1,
                     stringTrimmed);
+            continuousDynamicExpression.ColorXML = fontColor;
+            continuousDynamicExpression.language = language;
             const openWordContinuousDynamic: MultiExpression = this.getMultiExpression;
             if (openWordContinuousDynamic) {
                 this.closeOpenContinuousDynamic(openWordContinuousDynamic.StartingContinuousDynamic, currentMeasure, inSourceMeasureCurrentFraction);
@@ -788,12 +1119,15 @@ export class ExpressionReader {
             currentMeasure.hasMoodExpressions = true;
             const moodExpression: MoodExpression = new MoodExpression(stringTrimmed, this.placement, this.staffNumber);
             moodExpression.fontStyle = fontStyle;
+            moodExpression.ColorXML = fontColor;
+            moodExpression.language = language;
+            moodExpression.YPositionXml = yPositionXml;
             multiExpression.addExpression(moodExpression, prefix);
             return true;
         }
 
         // create unknown:
-        const unknownMultiExpression: MultiExpression = this.createNewMultiExpressionIfNeeded(currentMeasure, -1);
+        const unknownMultiExpression: MultiExpression = this.createNewMultiExpressionIfNeeded(currentMeasure, -1, inSourceMeasureCurrentFraction);
         // check here first if there might be a tempo expression doublette:
         if (currentMeasure.TempoExpressions.length > 0) {
             for (let idx: number = 0, len: number = currentMeasure.TempoExpressions.length; idx < len; ++idx) {
@@ -814,14 +1148,18 @@ export class ExpressionReader {
                 }
             }
         }
-        let textAlignment: TextAlignmentEnum = TextAlignmentEnum.CenterBottom;
+        let textAlignment: TextAlignmentEnum = this.musicSheet.Rules.UnknownExpressionTextAlignment;
         if (this.musicSheet.Rules.CompactMode) {
             textAlignment = TextAlignmentEnum.LeftBottom;
         }
         const unknownExpression: UnknownExpression = new UnknownExpression(
             stringTrimmed, this.placement, textAlignment, this.staffNumber);
         unknownExpression.fontStyle = fontStyle;
+        unknownExpression.ColorXML = fontColor;
+        unknownExpression.language = language;
         unknownExpression.defaultYXml = defaultYXml;
+        unknownExpression.YPositionXml = yPositionXml;
+        unknownExpression.parentMeasure = currentMeasure;
         unknownMultiExpression.addExpression(unknownExpression, prefix);
         return false;
     }

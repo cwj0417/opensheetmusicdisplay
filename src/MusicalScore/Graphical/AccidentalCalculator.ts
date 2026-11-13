@@ -6,15 +6,22 @@ import {NoteEnum} from "../../Common/DataObjects/Pitch";
 import { Dictionary } from "typescript-collections";
 // import { Dictionary } from "typescript-collections/dist/lib";
 import { MusicSheetCalculator } from "./MusicSheetCalculator";
+import { Tie } from "../VoiceData/Tie";
 
 /**
  * Compute the accidentals for notes according to the current key instruction
  */
 export class AccidentalCalculator {
     private keySignatureNoteAlterationsDict: Dictionary<number, AccidentalEnum> = new Dictionary<number, AccidentalEnum>();
-    private currentAlterationsComparedToKeyInstructionList: number[] = [];
     private currentInMeasureNoteAlterationsDict: Dictionary<number, AccidentalEnum> = new Dictionary<number, AccidentalEnum>();
+    /** The last note of each pitch in the current measure that got an accidental, except grace notes (see isAccidentalDrawnAtSameTime()) */
+    private lastNoteWithAccidentalDict: Dictionary<number, GraphicalNote> = new Dictionary<number, GraphicalNote>();
+    /** The hidden notes (print-object="no") sharing a visible unison note's head that would have got an accidental,
+     * by pitch key: see addAccidental(). */
+    private hiddenNoteWithAccidentalDict: Dictionary<number, { note: GraphicalNote, accidental: AccidentalEnum }> =
+        new Dictionary<number, { note: GraphicalNote, accidental: AccidentalEnum }>();
     private activeKeyInstruction: KeyInstruction;
+    public Transpose: number; // set in MusicSheetCalculator
 
     public get ActiveKeyInstruction(): KeyInstruction {
         return this.activeKeyInstruction;
@@ -32,7 +39,8 @@ export class AccidentalCalculator {
      */
     public doCalculationsAtEndOfMeasure(): void {
         this.currentInMeasureNoteAlterationsDict.clear();
-        this.currentAlterationsComparedToKeyInstructionList.clear();
+        this.lastNoteWithAccidentalDict.clear();
+        this.hiddenNoteWithAccidentalDict.clear();
         for (const key of this.keySignatureNoteAlterationsDict.keys()) {
             this.currentInMeasureNoteAlterationsDict.setValue(key, this.keySignatureNoteAlterationsDict.getValue(key));
         }
@@ -63,55 +71,148 @@ export class AccidentalCalculator {
             this.symbolFactory.addGraphicalAccidental(graphicalNote, pitch);
         }*/
 
-        const isInCurrentAlterationsToKeyList: boolean = this.currentAlterationsComparedToKeyInstructionList.indexOf(pitchKey) >= 0;
-        if (this.currentInMeasureNoteAlterationsDict.containsKey(pitchKey)) {
-            if (isInCurrentAlterationsToKeyList) {
-                this.currentAlterationsComparedToKeyInstructionList.splice(this.currentAlterationsComparedToKeyInstructionList.indexOf(pitchKey), 1);
+        const tie: Tie = graphicalNote.sourceNote.NoteTie;
+        if (tie && graphicalNote.sourceNote !== tie.StartNote) {
+            // The continued note of a tie carries its accidental over implicitly, so it's
+            // normally suppressed. The exception is an enharmonic tie (e.g. F#–Gb, #1694),
+            // which respells one sounding pitch with a *different letter name* — that note must
+            // draw its own accidental. Distinguish by letter (FundamentalNote), not by the
+            // accidental enum: a natural-to-natural tie across a barline (e.g. B♮ tied to B under
+            // a B♭ key signature) is the same written note and its NATURAL/NONE enums may differ,
+            // yet it must stay suppressed (#1695 review). Only a different letter falls through.
+            const startPitch: Pitch = tie.StartNote.Pitch;
+            const sameLetter: boolean = startPitch !== undefined
+                && startPitch.FundamentalNote === pitch.FundamentalNote;
+            if (sameLetter) {
+                return; // same written note held across the tie — accidental is implied
             }
+        }
+
+        // A printed sign that disagrees with <alter> is drawn as printed (a historical sharp cancelling the key's flat,
+        //   sounding E natural); the measure keeps the sounding alteration, so the next E natural gets no natural sign.
+        const printedAccidental: AccidentalEnum = this.Transpose === 0 ? AccidentalCalculator.printedMismatchAccidental(pitch) : undefined;
+        if (printedAccidental !== undefined) {
+            this.currentInMeasureNoteAlterationsDict.setValue(pitchKey, pitch.AccidentalHalfTones);
+            this.addAccidental(graphicalNote, new Pitch(pitch.FundamentalNote, pitch.Octave, printedAccidental, pitch.AccidentalXml,
+                false, pitch.OctaveShiftApplied), pitchKey);
+            return;
+        }
+
+        if (this.currentInMeasureNoteAlterationsDict.containsKey(pitchKey)) {
             if (this.currentInMeasureNoteAlterationsDict.getValue(pitchKey) !== pitch.AccidentalHalfTones) {
                 if (this.keySignatureNoteAlterationsDict.containsKey(pitchKey) &&
                     this.keySignatureNoteAlterationsDict.getValue(pitchKey) !== pitch.AccidentalHalfTones) {
-                    this.currentAlterationsComparedToKeyInstructionList.push(pitchKey);
                     this.currentInMeasureNoteAlterationsDict.setValue(pitchKey, pitch.AccidentalHalfTones);
                 } else if (pitch.Accidental !== AccidentalEnum.NONE) {
-                    this.currentInMeasureNoteAlterationsDict.remove(pitchKey);
+                    // explicit accidental that matches the key signature, or of a pitch the key signature doesn't alter:
+                    //   restore the key signature state (#1564), or remember a sharp or flat the key signature doesn't have,
+                    //   e.g. F# after F natural in C major, so that the next F natural gets its natural sign again.
+                    if (this.keySignatureNoteAlterationsDict.containsKey(pitchKey)) {
+                        this.currentInMeasureNoteAlterationsDict.setValue(
+                            pitchKey,
+                            this.keySignatureNoteAlterationsDict.getValue(pitchKey)
+                        );
+                    } else if (pitch.AccidentalHalfTones === 0) {
+                        this.currentInMeasureNoteAlterationsDict.remove(pitchKey);
+                    } else {
+                        this.currentInMeasureNoteAlterationsDict.setValue(pitchKey, pitch.AccidentalHalfTones);
+                    }
+                } else {
+                    // pitch.Accidental === NONE: returning to natural state
+                    // Update dict so subsequent alterations are properly detected (#1564)
+                    this.currentInMeasureNoteAlterationsDict.setValue(pitchKey, pitch.AccidentalHalfTones);
                 }
 
                 const inMeasureAlterationAccidental: AccidentalEnum = this.currentInMeasureNoteAlterationsDict.getValue(pitchKey);
                 if (pitch.Accidental === AccidentalEnum.NONE) {
                     if (Math.abs(inMeasureAlterationAccidental) === 0.5) {
                         // fix to remember quartersharp and quarterflat and not make them natural on following notes
-                        pitch = new Pitch(pitch.FundamentalNote, pitch.Octave, AccidentalEnum.NONE);
+                        pitch = new Pitch(pitch.FundamentalNote, pitch.Octave, AccidentalEnum.NONE,
+                            undefined, false, pitch.OctaveShiftApplied);
                     } else {
                         // If an AccidentalEnum.NONE is given, it would not be rendered.
                         // We need here to convert to a AccidentalEnum.NATURAL:
-                        pitch = new Pitch(pitch.FundamentalNote, pitch.Octave, AccidentalEnum.NATURAL);
+                        pitch = new Pitch(pitch.FundamentalNote, pitch.Octave, AccidentalEnum.NATURAL,
+                            undefined, false, pitch.OctaveShiftApplied);
                     }
                 }
                 if (this.isAlterAmbiguousAccidental(pitch.Accidental) && ! pitch.AccidentalXml) {
                     return; // only display accidental if it was given as an accidental in the XML
                 }
-                MusicSheetCalculator.symbolFactory.addGraphicalAccidental(graphicalNote, pitch);
+                this.addAccidental(graphicalNote, pitch, pitchKey);
+            } else if ((pitch.AccidentalXml && this.Transpose === 0 || this.isAccidentalOfHiddenNoteAtSameTime(graphicalNote, pitch, pitchKey)) &&
+                !this.isAccidentalDrawnAtSameTime(graphicalNote, pitch, pitchKey)) {
+                // courtesy accidental, or the accidental a hidden note at the same time left to this note (see addAccidental())
+                this.addAccidental(graphicalNote, pitch, pitchKey);
+                // if transpose !== 0 (we're transposing), the courtesy accidental might not be appropriate here.
             }
         } else { // pitchkey not in measure dict:
             if (pitch.Accidental !== AccidentalEnum.NONE) {
-                if (!isInCurrentAlterationsToKeyList) {
-                    this.currentAlterationsComparedToKeyInstructionList.push(pitchKey);
-                }
                 this.currentInMeasureNoteAlterationsDict.setValue(pitchKey, pitch.AccidentalHalfTones);
                 if (this.isAlterAmbiguousAccidental(pitch.Accidental) && ! pitch.AccidentalXml) {
                     return;
                 }
-                MusicSheetCalculator.symbolFactory.addGraphicalAccidental(graphicalNote, pitch);
-            } else {
-                if (isInCurrentAlterationsToKeyList) {
-                    // we need here a AccidentalEnum.NATURAL now to get it rendered - AccidentalEnum.NONE would not be rendered
-                    pitch = new Pitch(pitch.FundamentalNote, pitch.Octave, AccidentalEnum.NATURAL);
-                    this.currentAlterationsComparedToKeyInstructionList.splice(this.currentAlterationsComparedToKeyInstructionList.indexOf(pitchKey), 1);
-                    MusicSheetCalculator.symbolFactory.addGraphicalAccidental(graphicalNote, pitch);
-                }
+                this.addAccidental(graphicalNote, pitch, pitchKey);
             }
         }
+    }
+
+    /** The printed <accidental> of the pitch when it is a plain sign whose alteration differs from the sounding one
+     *  (<alter>), else undefined: e.g. SHARP for an E with <alter>0</alter> and <accidental>sharp</accidental>.
+     *  (The reader makes a note with <accidental>natural</accidental> natural, so a natural can't differ, and signs drawn
+     *  as two glyphs, natural-sharp, ..., are left to VexFlowGraphicalNote.setAccidental().)
+     *  A transposed pitch has no AccidentalXml. */
+    private static printedMismatchAccidental(pitch: Pitch): AccidentalEnum {
+        const printed: AccidentalEnum = pitch.AccidentalXml ? AccidentalCalculator.printedAccidentals[pitch.AccidentalXml] : undefined;
+        return printed !== undefined && Pitch.HalfTonesFromAccidental(printed) !== pitch.AccidentalHalfTones ? printed : undefined;
+    }
+
+    private static readonly printedAccidentals: { [accidentalXml: string]: AccidentalEnum } = {
+        "double-sharp": AccidentalEnum.DOUBLESHARP,
+        "flat": AccidentalEnum.FLAT,
+        "flat-flat": AccidentalEnum.DOUBLEFLAT,
+        "sharp": AccidentalEnum.SHARP,
+    };
+
+    /** Adds the accidental of the pitch to the note, and remembers the note for isAccidentalDrawnAtSameTime(). */
+    private addAccidental(graphicalNote: GraphicalNote, pitch: Pitch, pitchKey: number): void {
+        // A hidden note (print-object="no") sharing the head of a visible unison note in another voice doesn't draw its
+        //   accidental, but VexFlow kept a column for it, so the visible note's accidental stood a head away (or the
+        //   visible note drew none, its pitch being altered in the measure already). The visible note draws it instead,
+        //   also without an accidental in the XML: e.g. a hidden eighth C flat starting an arpeggio on the open head of
+        //   a half note C flat, first in the measure.
+        if (!graphicalNote.sourceNote.PrintObject && graphicalNote.sourceNote.sharesNoteheadWithVisibleUnisonNote()) {
+            this.hiddenNoteWithAccidentalDict.setValue(pitchKey, { note: graphicalNote, accidental: pitch.Accidental });
+            return;
+        }
+        MusicSheetCalculator.symbolFactory.addGraphicalAccidental(graphicalNote, pitch);
+        if (!graphicalNote.parentVoiceEntry.parentVoiceEntry.IsGrace) {
+            this.lastNoteWithAccidentalDict.setValue(pitchKey, graphicalNote);
+        }
+    }
+
+    /**
+     * Whether a note of the same pitch at the same time, in another voice or in the same chord, already got this accidental.
+     * One accidental serves all these notes, e.g. in Dichterliebe measure 9, where two voices start with G natural,
+     * both with a natural given in the XML: drawing both would put two naturals in front of the note.
+     * Grace notes are drawn at their own position, so they are not counted.
+     */
+    private isAccidentalDrawnAtSameTime(graphicalNote: GraphicalNote, pitch: Pitch, pitchKey: number): boolean {
+        const noteWithAccidental: GraphicalNote = this.lastNoteWithAccidentalDict.getValue(pitchKey);
+        return noteWithAccidental !== undefined &&
+            !graphicalNote.parentVoiceEntry.parentVoiceEntry.IsGrace &&
+            noteWithAccidental.parentVoiceEntry.parentStaffEntry === graphicalNote.parentVoiceEntry.parentStaffEntry &&
+            noteWithAccidental.DrawnAccidental === pitch.Accidental;
+    }
+
+    /** Whether a hidden note of the same pitch at the same time left this accidental to the visible note (see addAccidental()). */
+    private isAccidentalOfHiddenNoteAtSameTime(graphicalNote: GraphicalNote, pitch: Pitch, pitchKey: number): boolean {
+        const hidden: { note: GraphicalNote, accidental: AccidentalEnum } = this.hiddenNoteWithAccidentalDict.getValue(pitchKey);
+        return hidden !== undefined &&
+            graphicalNote.sourceNote.PrintObject &&
+            !graphicalNote.parentVoiceEntry.parentVoiceEntry.IsGrace &&
+            hidden.note.parentVoiceEntry.parentStaffEntry === graphicalNote.parentVoiceEntry.parentStaffEntry &&
+            hidden.accidental === pitch.Accidental;
     }
 
     private isAlterAmbiguousAccidental(accidental: AccidentalEnum): boolean {
@@ -127,7 +228,6 @@ export class AccidentalCalculator {
             keyAccidentalType = AccidentalEnum.FLAT;
         }
         this.keySignatureNoteAlterationsDict.clear();
-        this.currentAlterationsComparedToKeyInstructionList.length = 0;
         for (let octave: number = -9; octave < 9; octave++) {
             for (let i: number = 0; i < noteEnums.length; i++) {
                 this.keySignatureNoteAlterationsDict.setValue(<number>noteEnums[i] + octave * 12, Pitch.HalfTonesFromAccidental(keyAccidentalType));

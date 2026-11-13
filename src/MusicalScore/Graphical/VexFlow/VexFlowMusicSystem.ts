@@ -11,6 +11,8 @@ import {EngravingRules} from "../EngravingRules";
 import { VexFlowInstrumentBracket } from "./VexFlowInstrumentBracket";
 import { VexFlowInstrumentBrace } from "./VexFlowInstrumentBrace";
 import { SkyBottomLineCalculator } from "../SkyBottomLineCalculator";
+import { GroupSymbol } from "../../InstrumentalGroup";
+import { unitInPixels } from "./VexFlowMusicSheetDrawer";
 
 export class VexFlowMusicSystem extends MusicSystem {
     constructor(id: number, rules: EngravingRules) {
@@ -61,9 +63,25 @@ export class VexFlowMusicSystem extends MusicSystem {
 
         if (bottomMeasure) {
             renderInitialLine = true;
-            // create here the correct lines according to the given lineType.
-            (bottomMeasure as VexFlowMeasure).lineTo(topMeasure as VexFlowMeasure, VexFlowConverter.line(lineType, linePosition));
+            // Set bar types on both staves before creating connectors,
+            // so VexFlow's stave formatting is aware of the REPEAT_BEGIN barline.
             (bottomMeasure as VexFlowMeasure).addMeasureLine(lineType, linePosition);
+            if (vfTopMeasure) {
+                vfTopMeasure.addMeasureLine(lineType, linePosition, renderInitialLine);
+            }
+
+            // For begin repeat barlines on measures with begin instructions (clef, key, time signature),
+            // shift the StaveConnector past the begin instructions so it aligns with the repeat barline
+            // rather than drawing at the stave's leftmost x position.
+            let connectorXShift: number = 0;
+            if (lineType === SystemLinesEnum.BoldThinDots && linePosition === SystemLinePosition.MeasureBegin
+                && topMeasure.beginInstructionsWidth > 0) {
+                connectorXShift = vfTopMeasure.getVFStave().getModifierXShift(0);
+            }
+
+            // create here the correct lines according to the given lineType.
+            (bottomMeasure as VexFlowMeasure).lineTo(
+                topMeasure as VexFlowMeasure, VexFlowConverter.line(lineType, linePosition), connectorXShift);
             //Double repeat. VF doesn't have concept of double repeat. Need to add stave connector to begin of next measure
             if (lineType === SystemLinesEnum.DotsBoldBoldDots) {
                 const nextIndex: number = bottomMeasure.ParentStaffLine.Measures.indexOf(bottomMeasure) + 1;
@@ -74,8 +92,7 @@ export class VexFlowMusicSystem extends MusicSystem {
                     nextBottomMeasure.addMeasureLine(SystemLinesEnum.BoldThinDots, linePosition);
                 }
             }
-        }
-        if (vfTopMeasure) {
+        } else if (vfTopMeasure) {
             vfTopMeasure.addMeasureLine(lineType, linePosition, renderInitialLine);
         }
 
@@ -97,24 +114,41 @@ export class VexFlowMusicSystem extends MusicSystem {
         return;
     }
 
+    /** A bracket, square bracket or line stands 5 px left of the staves, a brace 14 px (VexFlow's StaveConnector); each
+     *  column a GroupBracketColumnDistance further left. */
+    protected groupBracketReach(groupSymbol: GroupSymbol, column: number): number {
+        return (groupSymbol === GroupSymbol.Brace ? 14 : 5) / unitInPixels + column * this.rules.GroupBracketColumnDistance;
+    }
+
+    protected partBraceReach(column: number): number {
+        return this.groupBracketReach(GroupSymbol.Brace, column);
+    }
+
     /**
      * creates an instrument group bracket for the given dimension.
-     * There can be cascaded bracket (e.g. a group of 2 in a group of 4) -
-     * The recursion depth informs about the current depth level (needed for positioning)
+     * There can be cascaded brackets (e.g. a group of 2 in a group of 4): a nested group's bracket stands in the next column
+     * left of the outer group's (EngravingRules.GroupBracketColumnDistance), as does the brace of a multi-staff part inside
+     * the group (a brace is the outermost symbol, Gould, Behind Bars, p. 516; MuseScore and Dorico draw it so).
      * @param firstStaffLine the upper staff line of the bracket to create
      * @param lastStaffLine the lower staff line of the bracket to create
-     * @param recursionDepth
+     * @param column the column of the bracket left of the staves, 0 beside them
+     * @param groupSymbol the symbol to draw: bracket, brace, square (a thin line with right-angled hooks) or line
      */
-    protected createGroupBracket(firstStaffLine: StaffLine, lastStaffLine: StaffLine, recursionDepth: number): void {
+    protected createGroupBracket(firstStaffLine: StaffLine, lastStaffLine: StaffLine, column: number, groupSymbol: GroupSymbol): void {
         const firstVexStaff: VexFlowStaffLine = (firstStaffLine as VexFlowStaffLine);
         const lastVexStaff: VexFlowStaffLine = (lastStaffLine as VexFlowStaffLine);
-        if (recursionDepth === 0) {
-            const vexFlowBracket: VexFlowInstrumentBracket = new VexFlowInstrumentBracket(firstVexStaff, lastVexStaff, recursionDepth);
-            this.GroupBrackets.push(vexFlowBracket);
-        } else {
-            const vexFlowBrace: VexFlowInstrumentBrace = new VexFlowInstrumentBrace(firstVexStaff, lastVexStaff, recursionDepth);
-            this.GroupBrackets.push(vexFlowBrace);
+        const top: number = this.staffLines.indexOf(firstStaffLine);
+        const bottom: number = this.staffLines.indexOf(lastStaffLine);
+        for (const partBrace of this.InstrumentBrackets as VexFlowInstrumentBracket[]) {
+            const at: number = this.staffLines.indexOf(partBrace.FirstStaffLine);
+            if (at >= top && at <= bottom) {
+                partBrace.Column = Math.max(partBrace.Column, column + 1);
+            }
         }
-        return;
+        const bracket: VexFlowInstrumentBracket = groupSymbol === GroupSymbol.Brace ?
+            new VexFlowInstrumentBrace(firstVexStaff, lastVexStaff, column) :
+            new VexFlowInstrumentBracket(firstVexStaff, lastVexStaff, column);
+        bracket.Shape = groupSymbol;
+        this.GroupBrackets.push(bracket);
     }
 }

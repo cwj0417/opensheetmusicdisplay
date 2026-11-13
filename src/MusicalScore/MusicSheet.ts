@@ -18,11 +18,18 @@ import {Note} from "./VoiceData/Note";
 import {VoiceEntry} from "./VoiceData/VoiceEntry";
 import log from "loglevel";
 import { TextAlignmentEnum } from "../Common/Enums/TextAlignment";
+import { PlaybackSettings } from "../Common/DataObjects/PlaybackSettings";
 
 // FIXME Andrea: Commented out some unnecessary/not-ported-yet code, have a look at (*)
 
-export class PlaybackSettings {
-    public rhythm: Fraction;
+/** A default language of lyrics, from MusicXML's <defaults><lyric-language xml:lang="..." number="..." name="...">. */
+export interface LyricLanguage {
+    /** The lyric number it's for (undefined: any number, unless a name is given) */
+    number?: string;
+    /** The lyric name it's for (undefined: any name, unless a number is given) */
+    name?: string;
+    /** The language as a BCP 47 tag, e.g. "ja", see Label.language */
+    language: string;
 }
 
 /**
@@ -62,6 +69,7 @@ export class MusicSheet /*implements ISettableMusicSheet, IComparable<MusicSheet
     private title: Label;
     private subtitle: Label;
     private composer: Label;
+    private firstPageCreditWords: Label[] = [];
     private lyricist: Label;
     private copyright: Label;
     // private languages: Language[] = [];
@@ -81,6 +89,21 @@ export class MusicSheet /*implements ISettableMusicSheet, IComparable<MusicSheet
     // (*) private musicSheetParameterChangedDelegate: MusicSheetParameterChangedDelegate;
     /* Whether BPM info is present in the sheet. If it is set to false, each measure's BPM was set to a default of 120. */
     private hasBPMInfo: boolean;
+    /** Global factor / scale by which all measure widths will be scaled.
+     * (e.g. 0.7 = all measures are only 70% as long)
+     * This is similar to SourceMeasure.widthFactor,
+     *   which only applies to one measure and is multiplicative to the global factor.
+     *   (so if globalWidthFactor is 0.7 and measure.widthFactor is 0.7, that measure's length will be 49% as long)
+     * As with measure.widthFactor, use this with caution, as it can cause overlaps, especially with lyrics.
+     */
+    public MeasureWidthFactor: number = 1.0;
+    /** Ignore tempo instructions like metronome numbers, e.g. because a bpm was set in the UI */
+    public IgnoreTempoInstructions: boolean = false;
+    /** Whether the MusicXML's 8-digit colors are #RRGGBBAA (alpha last) instead of the spec's #AARRGGBB.
+     *  Set by the reader from <software>: MuseScore exports them like that, see [[musicXmlColorsAreAlphaLast]]. */
+    public XmlColorAlphaLast: boolean = false;
+    /** The default languages of the lyrics. A lyric's own xml:lang comes first, see LyricsEntry.language. */
+    public LyricLanguages: LyricLanguage[] = [];
 
     /**
      * Get the global index within the music sheet for this staff.
@@ -104,6 +127,9 @@ export class MusicSheet /*implements ISettableMusicSheet, IComparable<MusicSheet
     }
     public get DynListStaves(): DynamicsContainer[][] {
         return this.dynListStaves;
+    }
+    public set TimestampSortedTempoExpressionsList(value: MultiTempoExpression[]) {
+        this.timestampSortedTempoExpressionsList = value;
     }
     public get TimestampSortedTempoExpressionsList(): MultiTempoExpression[] {
         return this.timestampSortedTempoExpressionsList;
@@ -143,6 +169,9 @@ export class MusicSheet /*implements ISettableMusicSheet, IComparable<MusicSheet
         // (*) this.playbackSettings.BeatsPerMinute = startTempo;
         this.userStartTempoInBPM = startTempo;
     }
+    /** The start tempo the file gives, in quarter notes per minute (e.g. 60 for a metronome mark half = 30 without a
+     *  `<sound tempo>`). Setting it sets userStartTempoInBPM too.
+     */
     public get DefaultStartTempoInBpm(): number {
         return this.defaultStartTempoInBpm;
     }
@@ -226,6 +255,9 @@ export class MusicSheet /*implements ISettableMusicSheet, IComparable<MusicSheet
     }
     public set Composer(value: Label) {
         this.composer = value;
+    }
+    public get FirstPageCreditWords(): Label[] {
+        return this.firstPageCreditWords;
     }
     public get Lyricist(): Label {
         return this.lyricist;
@@ -454,14 +486,23 @@ export class MusicSheet /*implements ISettableMusicSheet, IComparable<MusicSheet
     //    }
     //
     //}
+    /** The tempo at the start of the piece in quarter notes per minute, not the first later tempo instruction. */
     public getExpressionsStartTempoInBPM(): number {
-        if (this.TimestampSortedTempoExpressionsList.length > 0) {
-            const me: MultiTempoExpression = this.TimestampSortedTempoExpressionsList[0];
-            if (me.InstantaneousTempo) {
-                return me.InstantaneousTempo.TempoInBpm;
-            } else if (me.ContinuousTempo) {
-                return me.ContinuousTempo.StartTempo;
+        const expressions: MultiTempoExpression[] = this.TimestampSortedTempoExpressionsList;
+        let me: MultiTempoExpression = expressions[0];
+        if (!me || me.AbsolutePlaybackTimestamp.RealValue !== 0) {
+            return this.userStartTempoInBPM;
+        }
+        // At time zero, use the last explicit sound tempo as the baseline, or the last instruction.
+        for (let i: number = 1; i < expressions.length && expressions[i].AbsolutePlaybackTimestamp.RealValue === 0; i++) {
+            if (!(me.PlaybackTempoInBpm > 0) || expressions[i].PlaybackTempoInBpm > 0) {
+                me = expressions[i];
             }
+        }
+        if (me.InstantaneousTempo) {
+            return me.PlaybackTempoInBpm ?? me.InstantaneousTempo.TempoInQuarterNotesPerMinute;
+        } else if (me.ContinuousTempo) {
+            return me.ContinuousTempo.StartTempo;
         }
         return this.userStartTempoInBPM;
     }
@@ -499,6 +540,7 @@ export class MusicSheet /*implements ISettableMusicSheet, IComparable<MusicSheet
      * E.g. +1 halftone will transpose Eb major to E major.
      * also see Instrument.Transpose (e.g. osmd.Sheet.Instruments[0].Transpose will additionally transpose this instrument only)
      * osmd.TransposeCaculator needs to be defined/created for this to take effect. (just set it with new TransposeCalculator())
+     * The next osmd.render() applies it (no need to call osmd.updateGraphic()).
      */
     public set Transpose(value: number) {
         this.transpose = value;
@@ -586,7 +628,7 @@ export class MusicSheet /*implements ISettableMusicSheet, IComparable<MusicSheet
         const visInstruments: Instrument[] = [];
         for (let idx: number = 0, len: number = this.Instruments.length; idx < len; ++idx) {
             const instrument: Instrument = this.Instruments[idx];
-            if (instrument.Voices.length > 0 && instrument.Voices[0].Visible) {
+            if (instrument.Visible) {
                 visInstruments.push(instrument);
             }
         }

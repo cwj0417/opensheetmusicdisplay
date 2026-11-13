@@ -15,6 +15,7 @@ import { GraphicalSlur } from "./GraphicalSlur";
 import { AbstractGraphicalExpression } from "./AbstractGraphicalExpression";
 import { GraphicalPedal } from "./GraphicalPedal";
 import { GraphicalGlissando } from "./GraphicalGlissando";
+import { GraphicalWavyLine } from "./GraphicalWavyLine";
 
 /**
  * A StaffLine contains the [[Measure]]s in one line of the music sheet
@@ -69,17 +70,18 @@ export abstract class StaffLine extends GraphicalObject {
                     break;
             }
         } else {
+            // offsets from the top line of a five-line staff, see VexFlowMeasure.setLineNumber(): 2-4 lines end at G4 (3)
             switch (this.ParentStaff.StafflineCount) {
                 case 4:
-                    this.bottomLineOffset = 1;
+                    this.bottomLineOffset = 3;
                     break;
                 case 3:
                     this.topLineOffset = 1;
-                    this.bottomLineOffset = 1;
+                    this.bottomLineOffset = 3;
                     break;
                 case 2:
                     this.topLineOffset = 2;
-                    this.bottomLineOffset = 1;
+                    this.bottomLineOffset = 3;
                     break;
                 case 1:
                     this.topLineOffset = 2;
@@ -173,6 +175,7 @@ export abstract class StaffLine extends GraphicalObject {
     }
 
     public Pedals: GraphicalPedal[] = [];
+    public WavyLines: GraphicalWavyLine[] = [];
 
     public get StaffHeight(): number {
         return this.staffHeight;

@@ -8,7 +8,7 @@ import {Tie} from "./Tie";
 import {Staff} from "./Staff";
 import {Slur} from "./Expressions/ContinuousExpressions/Slur";
 import {NoteState} from "../Graphical/DrawingEnums";
-import {Notehead} from "./Notehead";
+import {Notehead, NoteHeadShape} from "./Notehead";
 import {Arpeggio} from "./Arpeggio";
 import {NoteType} from "./NoteType";
 import { SourceMeasure } from "./SourceMeasure";
@@ -70,6 +70,10 @@ export class Note {
     private slurs: Slur[] = [];
     private playbackInstrumentId: string = undefined;
     private notehead: Notehead = undefined;
+    /** Custom notehead vexflow code. E.g. "vb" = quarter, "v1d" = whole, "v53" = half, etc. - see tables.js
+     * Set this before render() (e.g. after load, before first render).
+     */
+    public CustomNoteheadVFCode: string;
     /** States whether the note should be displayed. False if xmlNode.attribute("print-object").value = "no". */
     private printObject: boolean = true;
     /** The Arpeggio this note is part of. */
@@ -79,8 +83,8 @@ export class Note {
     public IsGraceNote: boolean;
     /** The stem direction asked for in XML. Not necessarily final or wanted stem direction. */
     private stemDirectionXml: StemDirectionType;
-    /** The number of tremolo strokes this note has (16th tremolo = 2 strokes).
-     * Could be a Tremolo object in future when there is more data like tremolo between two notes.
+    /** Tremolo information for this note, e.g. the number of tremolo strokes (16th tremolo = 2 strokes),
+     * or the TremoloBetweenNotes object for a tremolo between two notes.
      */
     public TremoloInfo: TremoloInfo;
     /** Color of the stem given in the XML Stem tag. RGB Hexadecimal, like #00FF00.
@@ -95,6 +99,14 @@ export class Note {
      * because Note.Notehead is undefined for normal Noteheads to save space and time.
      */
     private noteheadColorXml: string;
+    /** Whether the accidental given in XML is in parentheses (<accidental parentheses="yes">),
+     * usually a cautionary (courtesy) accidental. Drawn in parentheses, see VexFlowConverter.StaveNote().
+     */
+    public AccidentalParenthesesXml: boolean;
+    /** Whether the accidental given in XML is in brackets (<accidental bracket="yes">),
+     * e.g. an editorial accidental. Drawn in parentheses, see VexFlowConverter.StaveNote().
+     */
+    public AccidentalBracketXml: boolean;
     /** Color of the notehead currently set/desired for next render. RGB Hexadecimal, like #00FF00.
      * Needs to be stored here and not in Note.Notehead,
      * because Note.Notehead is undefined for normal Noteheads to save space and time.
@@ -111,6 +123,15 @@ export class Note {
      */
     public NoteToGraphicalNoteObjectId: number; // used with EngravingRules.NoteToGraphicalNoteMap
 
+    public ToStringShort(octaveOffset: number = 0): string {
+        if (!this.Pitch || this.isRest()) {
+            return "rest"; // Pitch is undefined for rest notes
+        }
+        return this.Pitch?.ToStringShort(octaveOffset);
+    }
+    public get ToStringShortGet(): string {
+        return this.ToStringShort(0);
+    }
     public get ParentVoiceEntry(): VoiceEntry {
         return this.voiceEntry;
     }
@@ -119,6 +140,9 @@ export class Note {
     }
     public get ParentStaffEntry(): SourceStaffEntry {
         return this.parentStaffEntry;
+    }
+    public set ParentStaffEntry(value: SourceStaffEntry) {
+        this.parentStaffEntry = value;
     }
     public get ParentStaff(): Staff {
         return this.parentStaffEntry.ParentStaff;
@@ -171,6 +195,9 @@ export class Note {
     public set NoteTuplet(value: Tuplet) {
         this.tuplet = value;
     }
+    /** All tuplets this note is part of, from outermost to innermost (for nested tuplets). Usually a single tuplet.
+     *  NoteTuplet stays the innermost one for backwards compatibility; this list adds the enclosing tuplet(s). */
+    public NoteTuplets: Tuplet[] = [];
     public get NoteGlissando(): Glissando {
         return this.glissando;
     }
@@ -200,6 +227,58 @@ export class Note {
     }
     public set PrintObject(value: boolean) {
         this.printObject = value;
+    }
+    /** Whether the note is drawn: it's not hidden (PrintObject), or EngravingRules.RenderHiddenNotes draws hidden notes too,
+     *  and its voice isn't hidden in its shown instrument (Voice.isHiddenInShownInstrument(), not drawn with RenderHiddenNotes
+     *  either). The notes of a hidden instrument stay visible: the instrument isn't drawn as a whole.
+     *  Use this instead of PrintObject to decide what to draw.
+     *  This doesn't change with GraphicalNote.setVisible(): GraphicalNote.isVisible() also checks that. */
+    public isVisible(): boolean {
+        return (this.printObject || this.sourceMeasure?.Rules?.RenderHiddenNotes === true) &&
+            !this.voiceEntry?.ParentVoice?.isHiddenInShownInstrument();
+    }
+    /** Whether this note's own notehead is hidden (e.g. print-object="no" or notehead "none") but there is a
+     * visible note on the same staff line in another voice at the same staff entry - i.e. a unison whose visible
+     * notehead this note shares. Used to render such a note like a visible one instead of dropping it: its beam
+     * and stem (the stem still emanates from the shared notehead and joins the beam), the notehead Vexflow lays
+     * out beside the visible one wherever the two heads can't be merged into one column
+     * (VexFlowVoiceEntry.drawnAsSharedUnisonNote), and its place in a tuplet, whose number spans it either way.
+     * E.g. an eighth note sharing a notehead with a dotted quarter in Beethoven's Moonlight Sonata 1st mvt. m.37
+     * (test_unison_notehead_moonlight_sonata_measure37), or the first note of a triplet sharing a half note's
+     * notehead in Debussy's Arabesque no. 1 m.3 (test_unison_notehead_tuplet_arabesque_measure3). */
+    public sharesNoteheadWithVisibleUnisonNote(): boolean {
+        return this.visibleUnisonNoteSharingNotehead() !== undefined;
+    }
+
+    /** The visible note in another voice whose notehead this note shares (see
+     * {@link sharesNoteheadWithVisibleUnisonNote}), or undefined if this note's own notehead is visible or
+     * there is no such note. A note of a hidden voice (Voice.isHiddenInShownInstrument()) shares none: it isn't drawn
+     * at all, not even its stem, beam or tie at another voice's notehead. */
+    public visibleUnisonNoteSharingNotehead(): Note {
+        if (this.isVisible() && this.notehead?.Shape !== NoteHeadShape.NONE) {
+            return undefined; // this note's own notehead is visible, nothing to share
+        }
+        if (this.voiceEntry?.ParentVoice?.isHiddenInShownInstrument()) {
+            return undefined;
+        }
+        // Grace notes are ornaments before a main note, not a note sounding simultaneously - they share their
+        // staff entry with that main note, so don't treat that as a unison (would falsely keep their stem).
+        if (!this.pitch || !this.parentStaffEntry || this.voiceEntry?.IsGrace) {
+            return undefined;
+        }
+        for (const otherVoiceEntry of this.parentStaffEntry.VoiceEntries) {
+            if (otherVoiceEntry === this.voiceEntry || otherVoiceEntry.IsGrace) {
+                continue;
+            }
+            for (const otherNote of otherVoiceEntry.Notes) {
+                if (otherNote.isVisible() && otherNote.notehead?.Shape !== NoteHeadShape.NONE && otherNote.pitch &&
+                    otherNote.pitch.FundamentalNote === this.pitch.FundamentalNote &&
+                    otherNote.pitch.Octave === this.pitch.Octave) {
+                    return otherNote; // visible note on the same staff line in another voice
+                }
+            }
+        }
+        return undefined;
     }
     public get Arpeggio(): Arpeggio {
         return this.arpeggio;
@@ -292,6 +371,9 @@ export class Note {
         }
         return false;
     }
+    public hasTabEffects(): boolean {
+        return false; // override in TabNote
+    }
 }
 
 export enum Appearance {
@@ -301,8 +383,32 @@ export enum Appearance {
 }
 
 export interface TremoloInfo {
+    /** Number of tremolo strokes (e.g. 16th tremolo = 2 strokes).
+     * For a tremolo between notes, the number of strokes ("tremolo beams") drawn between the two notes. */
     tremoloStrokes: number;
     /** Buzz roll (type="unmeasured" in XML) */
     tremoloUnmeasured: boolean;
-    // could in future be extended e.g. for tremolo between notes
+    /** Whether this note starts a tremolo between (two) notes (type="start" in XML). */
+    tremoloBetweenNotesStart?: boolean;
+    /** Whether this note stops/ends a tremolo between (two) notes (type="stop" in XML). */
+    tremoloBetweenNotesStop?: boolean;
+    /** The tremolo between (two) notes this note is part of, linking start and stop note.
+     * This object is shared between the start note and the stop note,
+     * set in VoiceGenerator.handleTremoloBetweenNotes(). */
+    tremoloBetweenNotes?: TremoloBetweenNotes;
+}
+
+/** A tremolo between two notes, e.g. two alternating half notes with 3 strokes ("tremolo beams") between them,
+ * often seen in orchestral string parts. (<tremolo type="start"> and type="stop" in MusicXML)
+ * Note that for these tremolos, each note is notated with the full duration of the tremolo,
+ * but only played for half of it (e.g. notated two half notes = tremolo over one half note duration),
+ * so Note.TypeLength is twice the Note.Length here.
+ * The strokes are drawn in VexFlowMusicSheetDrawer.drawTremolosBetweenNotes(). */
+export interface TremoloBetweenNotes {
+    /** Number of strokes ("tremolo beams") drawn between the two notes. */
+    strokes: number;
+    /** The first/left note of the tremolo. */
+    startNote: Note;
+    /** The second/right note of the tremolo. Undefined until the stop note is read. */
+    stopNote: Note;
 }

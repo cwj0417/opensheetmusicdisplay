@@ -83,7 +83,10 @@ Flow.keyProperties = (key, clef, params) => {
   let octave = parseInt(pieces[1], 10);
 
   // Octave_shift is the shift to compensate for clef 8va/8vb.
-  octave += -1 * options.octave_shift;
+  octave -= options.octave_shift;
+  // VexFlowPatch: change "+= -1 *" to "-=". No change in OSMD detected,
+  //   though apparently -0 can cause issues on some systems.
+  //   https://github.com/0xfe/vexflow/pull/1596
 
   const base_index = (octave * 7) - (4 * 7);
   let line = (base_index + value.index) / 2;
@@ -227,6 +230,10 @@ Flow.keyProperties.customNoteHeads = {
   /* Rectangle */
   'R1': { code: 'vd5', shift_right: 0 },
   'R2': { code: 'vd4', shift_right: 0 },
+
+  /* Whole and Half Rests with ledger line */
+  'rwl': { code: 'rwl', shift_right: 0 },
+  'rhl': { code: 'rhl', shift_right: 0 },
 };
 
 Flow.integerToNote = integer => {
@@ -261,14 +268,17 @@ Flow.integerToNote.table = {
   11: 'B',
 };
 
-Flow.tabToGlyph = (fret, scale = 1.0) => {
+Flow.tabToGlyph = (fret, scale = 1.0, useAlternativeXGlyph = false) => {
   let glyph = null;
   let width = 0;
   let shift_y = 0;
 
   if (fret.toString().toUpperCase() === 'X') {
-    const glyphMetrics = new Glyph('v7f', Flow.DEFAULT_TABLATURE_FONT_SCALE).getMetrics();
     glyph = 'v7f';
+    if (useAlternativeXGlyph) { // VexFlowPatch
+      glyph = 'v3e'; // same as in classical notes
+    }
+    const glyphMetrics = new Glyph(glyph, Flow.DEFAULT_TABLATURE_FONT_SCALE * scale).getMetrics();
     width = glyphMetrics.width;
     shift_y = -glyphMetrics.height / 2;
   } else {
@@ -649,7 +659,7 @@ Flow.getGlyphProps.duration_codes = {
   '1/2': {
     common: {
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'v53', scale).getMetrics().width;
+        return Glyph.cachedWidth(this.code_head || 'v53', scale);
       },
       stem: false,
       stem_offset: 0,
@@ -689,7 +699,7 @@ Flow.getGlyphProps.duration_codes = {
   '1': {
     common: {
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'v1d', scale).getMetrics().width;
+        return Glyph.cachedWidth(this.code_head || 'v1d', scale);
       },
       stem: false,
       stem_offset: 0,
@@ -729,7 +739,7 @@ Flow.getGlyphProps.duration_codes = {
   '2': {
     common: {
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'v81', scale).getMetrics().width;
+        return Glyph.cachedWidth(this.code_head || 'v81', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -770,7 +780,7 @@ Flow.getGlyphProps.duration_codes = {
   '4': {
     common: {
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return Glyph.cachedWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -813,7 +823,7 @@ Flow.getGlyphProps.duration_codes = {
   '8': {
     common: {
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return Glyph.cachedWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -860,7 +870,7 @@ Flow.getGlyphProps.duration_codes = {
     common: {
       beam_count: 2,
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return Glyph.cachedWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -906,7 +916,7 @@ Flow.getGlyphProps.duration_codes = {
     common: {
       beam_count: 3,
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return Glyph.cachedWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -952,7 +962,7 @@ Flow.getGlyphProps.duration_codes = {
     common: {
       beam_count: 4,
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return Glyph.cachedWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,
@@ -998,7 +1008,7 @@ Flow.getGlyphProps.duration_codes = {
     common: {
       beam_count: 5,
       getWidth(scale = Flow.DEFAULT_NOTATION_FONT_SCALE) {
-        return new Glyph(this.code_head || 'vb', scale).getMetrics().width;
+        return Glyph.cachedWidth(this.code_head || 'vb', scale);
       },
       stem: true,
       stem_offset: 0,

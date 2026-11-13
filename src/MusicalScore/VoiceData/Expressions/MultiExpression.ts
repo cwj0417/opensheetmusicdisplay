@@ -9,6 +9,7 @@ import {AbstractExpression} from "./AbstractExpression";
 import {PlacementEnum} from "./AbstractExpression";
 import { FontStyles } from "../../../Common/Enums/FontStyles";
 import { Pedal } from "./ContinuousExpressions/Pedal";
+import { WavyLine } from "./ContinuousExpressions/WavyLine";
 
 export class MultiExpression {
 
@@ -20,6 +21,9 @@ export class MultiExpression {
     private sourceMeasure: SourceMeasure;
     private staffNumber: number;
     private timestamp: Fraction;
+    /** Explicit MusicXML sound-dynamics timing, independent of the printed position. */
+    public PlaybackTimestamp: Fraction;
+    public EndOffsetFraction: Fraction;
     /** The 'number="x"' given in XML, e.g. of a wedge, used to identify similar expressions. */
     public numberXml: number;
     private instantaneousDynamic: InstantaneousDynamicExpression;
@@ -33,6 +37,8 @@ export class MultiExpression {
     private octaveShiftEnd: OctaveShift;
     public PedalStart: Pedal;
     public PedalEnd: Pedal;
+    public WavyLineStart: WavyLine;
+    public WavyLineEnd: WavyLine;
 
     public get SourceMeasureParent(): SourceMeasure {
         return this.sourceMeasure;
@@ -54,6 +60,9 @@ export class MultiExpression {
     }
     public get AbsoluteTimestamp(): Fraction {
         return Fraction.plus(this.timestamp, this.sourceMeasure.AbsoluteTimestamp);
+    }
+    public get AbsolutePlaybackTimestamp(): Fraction {
+        return Fraction.plus(this.PlaybackTimestamp ?? this.timestamp, this.sourceMeasure.AbsoluteTimestamp);
     }
     public get InstantaneousDynamic(): InstantaneousDynamicExpression {
         return this.instantaneousDynamic;
@@ -130,6 +139,14 @@ export class MultiExpression {
        }
        return fontStyle;
     }
+
+    public getColorXMLOfFirstEntry(): string {
+        let colorXML: string;
+        if (this.expressions.length >= 1) {
+            colorXML = this.expressions[0].expression.ColorXML;
+        }
+        return colorXML;
+     }
     //public getFirstEntry(staffLine: StaffLine, graphLabel: GraphicalLabel): AbstractGraphicalExpression {
     //    let indexOfFirstNotInstDynExpr: number = 0;
     //    if (this.expressions[0].expression instanceof InstantaneousDynamicExpression)

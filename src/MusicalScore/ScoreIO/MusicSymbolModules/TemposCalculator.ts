@@ -1,0 +1,338 @@
+import { Fraction } from "../../../Common/DataObjects/Fraction";
+import { SystemLinesEnum } from "../../Graphical";
+import { IAfterSheetReadingModule } from "../../Interfaces";
+import { MusicSheet } from "../../MusicSheet";
+import { PlacementEnum } from "../../VoiceData/Expressions/AbstractExpression";
+import { ContinuousTempoExpression } from "../../VoiceData/Expressions/ContinuousExpressions/ContinuousTempoExpression";
+import { ChangeSubType, InstantaneousTempoExpression, InstTempo, TempoType } from "../../VoiceData/Expressions/InstantaneousTempoExpression";
+import { MultiTempoExpression } from "../../VoiceData/Expressions/MultiTempoExpression";
+import { SourceMeasure } from "../../VoiceData/SourceMeasure";
+
+/** Process the TempoExpressions of a MusicSheet
+ *
+ * \details This class exposes one method: #calculate
+ * to implement #IAfterSheetReadingModule
+ */
+export class TemposCalculator implements IAfterSheetReadingModule {
+/** This is the method exposed for #IAfterSheetReadingModule */
+    public calculate(musicSheet: MusicSheet): void {
+        TemposCalculator.processTempoExpressions(musicSheet);
+    }
+
+    /** This is where the work is done.
+     *
+     * - [1] all MultiTempoExpressions are read from the MusicSheet
+     * - they are sorted in priority order (#myTempoSorter.Compare)
+     * - [2] all Inst Tempos are given a BPM if needed
+     * - all Inst and Cont tempos for a single TimeStamp are consolidated
+     * - [3] ContinuousTempo values are calculated
+     */
+    private static processTempoExpressions(musicSheet: MusicSheet | null): void {
+        const AllExp: MultiTempoExpression[] = [];
+        for (
+            let sourceMeasureIndex: number = 0, sourceMeasures: SourceMeasure[] = musicSheet.SourceMeasures;
+            sourceMeasureIndex < sourceMeasures.length; sourceMeasureIndex++
+        ) {
+            const sourceMeasure: SourceMeasure = sourceMeasures[sourceMeasureIndex];
+            // most importantly we need to sort the lists within the measures!!
+            sourceMeasure.TempoExpressions.sort(TempoSorter.Compare);
+            for (
+                let mte1Index: number = 0, mte1Source: MultiTempoExpression[] = sourceMeasure.TempoExpressions;
+                mte1Index < mte1Source.length; mte1Index++)
+            {
+                const mte1: MultiTempoExpression = mte1Source[mte1Index];
+                if ( mte1.InstantaneousTempo != null && mte1.InstantaneousTempo.TempoType === TempoType.none ) {
+                    /** This is to handle bad input data.
+                     * If a Inst tempo gets into the system without a TempoType being assigned
+                     *  we here give it the assumed value of inst.
+                     */
+                    mte1.InstantaneousTempo.TempoType = TempoType.inst;
+                }
+                AllExp.push(mte1);
+            }
+        }
+        AllExp.sort(TempoSorter.Compare);
+        const primoTempo: number = TemposCalculator.cleanExpListStartingEntry(musicSheet, AllExp);
+        const ExpressionsList: MultiTempoExpression[] = [];
+        let previousMte: MultiTempoExpression = null;
+        // the tempo in force, in quarter notes per minute (a metronome mark's TempoInBpm counts its beat unit)
+        let previousTempo: number = primoTempo;
+        // The tempo that "a tempo" returns to: the one before the latest temporary change, e.g. before a rit. or piu lento.
+        let aTempo: number = primoTempo;
+        let tempoBeforeTimestamp: number = primoTempo;
+        let soundTempoTimestamp: Fraction;
+        for (let mteIndex: number = 0, mteSource: MultiTempoExpression[] = AllExp; mteIndex < mteSource.length; mteIndex++) {
+            const mte: MultiTempoExpression = mteSource[mteIndex];
+            const isAtStart: boolean = mte.AbsolutePlaybackTimestamp.Equals(mteSource[0].AbsolutePlaybackTimestamp);
+            if (mteIndex > 0 && !mte.AbsolutePlaybackTimestamp.Equals(mteSource[mteIndex - 1].AbsolutePlaybackTimestamp)) {
+                tempoBeforeTimestamp = previousTempo;
+            }
+            if (previousMte === null || mte.AbsoluteTimestamp !== previousMte.AbsoluteTimestamp) {
+                // Here we make sure that all Inst tempos have a non-zero BPM.
+                if (mte.InstantaneousTempo != null && mte.InstantaneousTempo.TempoInBpm === 0.0) {
+                    const ite: InstantaneousTempoExpression = mte.InstantaneousTempo;
+                    /** A metronome mark without a BPM, e.g. a note equation (a metric modulation or a swing mark), or bad input data:
+                     *  it keeps the tempo in force, changed by the ratio of a note equation's sides (1 for a swing mark).
+                     */
+                    if (ite.isMetronomeMark) {
+                        const factor: Fraction = ite.getNoteEquationTempoFactor();
+                        ite.TempoInBpm = previousTempo * factor.GetExpandedNumerator() / factor.Denominator;
+                    } else if (ite.TempoType === TempoType.inst) {
+                        // An inst tempo should normally have a non-zero BPM.
+                        ite.TempoInBpm = InstantaneousTempoExpression.getDefaultValueForInstTempo(ite.InstTempo);
+                    }
+                    // A change word (e.g. rit.) and a word with only add-ons (e.g. poco rit., molto accel.) have no tempo of their own:
+                    //   0 BPM keeps the tempo in force (MusicPartManagerIterator.updateCurrentBpm()). A return to a tempo gets that tempo.
+                    // A change tempo will have a 0 BPM unless it was set by #calculatePrimoTempo, because it was on the first measure.
+                    if (ite.TempoType === TempoType.change) {
+                        switch (ite.ChangeSubType) {
+                            case ChangeSubType.atempo:
+                                {
+                                    ite.TempoInBpm = aTempo;
+                                    break;
+                                }
+                            case ChangeSubType.doppioMovimento:
+                                {
+                                    ite.TempoInBpm = previousTempo * 2;
+                                    break;
+                                }
+                            case ChangeSubType.tempoprimo:
+                                {
+                                    ite.TempoInBpm = primoTempo;
+                                    break;
+                                }
+                            default:
+                                {
+                                    break;
+                                }
+                        }
+                    }
+                }
+                // Keep explicit sound BPM over simultaneous inferred values as the baseline for later marks.
+                if (mte.PlaybackTempoInBpm > 0) {
+                    previousTempo = mte.PlaybackTempoInBpm;
+                    soundTempoTimestamp = mte.AbsolutePlaybackTimestamp;
+                } else if (mte.InstantaneousTempo?.TempoInBpm > 0 && !mte.AbsolutePlaybackTimestamp.Equals(soundTempoTimestamp)) {
+                    previousTempo = mte.InstantaneousTempo.TempoInQuarterNotesPerMinute;
+                }
+                // "a tempo" returns to the tempo before the latest temporary change: before its timestamp, so also before
+                //   a metronome mark given with it (e.g. piu mosso with a BPM). At the start, a temporary-looking word gives
+                //   the tempo of the piece (e.g. Poco allegretto). "a tempo" itself keeps the tempo to return to.
+                if (TemposCalculator.isTemporaryChange(mte) && !isAtStart) {
+                    aTempo = tempoBeforeTimestamp;
+                } else if (mte.InstantaneousTempo?.ChangeSubType !== ChangeSubType.atempo) {
+                    aTempo = previousTempo;
+                }
+            }
+            /** Here we process two mte entries with the same TimeStamp.
+             *
+             * They have been sorted by #myTempoSorter.Compare so that the 'prev' one
+             *  has higher priority than 'this' one.
+             * - If 'prev' and 'this' both have Inst, then 'this' Inst is lower priority. Delete 'this' Inst.
+             * - If 'prev' and 'this' both have Cont, then delete 'this' Cont.
+             * - If 'prev' does not have Cont and 'this' has Cont, then move 'this' Cont to 'prev'.
+             *
+             * \todo This should be looked at. Are there priorities between Cont labels?
+             */
+            else {
+                if (previousMte != null || mte.AbsoluteTimestamp === previousMte.AbsoluteTimestamp) {
+                    if (previousMte.InstantaneousTempo != null && mte.InstantaneousTempo != null) {
+                        mte.clearInstantaneousTempo();
+                    }
+                    if (mte.ContinuousTempo != null) {
+                        if (previousMte.ContinuousTempo === null) {
+                            previousMte.addExpression(mte.ContinuousTempo, "");
+                        }
+                        mte.clearContinuousTempo();
+                    }
+                }
+            }
+            // If, after the above processing, 'this' mte doesn't have either Inst or Cont, discard it.
+            if (mte.InstantaneousTempo === null && mte.ContinuousTempo === null) {
+                // discard this mte and move on
+                const indexInList: number = mte.SourceMeasureParent.TempoExpressions.indexOf(mte);
+                if (indexInList >= 0) {
+                    mte.SourceMeasureParent.TempoExpressions.splice(indexInList, 1);
+                }
+            } else {
+                ExpressionsList.push(mte);
+                previousMte = mte;
+            }
+        }
+        previousTempo = primoTempo;
+        soundTempoTimestamp = undefined;
+        for (let exp_index: number = 0; exp_index < ExpressionsList.length; exp_index++) {
+            const mte: MultiTempoExpression = ExpressionsList[exp_index];
+            if (mte.PlaybackTempoInBpm > 0) {
+                previousTempo = mte.PlaybackTempoInBpm;
+                soundTempoTimestamp = mte.AbsolutePlaybackTimestamp;
+            } else if (mte.InstantaneousTempo != null && !mte.AbsolutePlaybackTimestamp.Equals(soundTempoTimestamp)) {
+                previousTempo = mte.InstantaneousTempo.TempoInQuarterNotesPerMinute;
+            }
+            if (mte.ContinuousTempo != null) {
+                const cte: ContinuousTempoExpression = mte.ContinuousTempo;
+                cte.StartTempo = previousTempo;
+                const startMeasureIdx: number = mte.SourceMeasureParent.measureListIndex;
+                let endMeasureIdx: number = startMeasureIdx;
+                const maxEndMeasureIdx: number = Math.min(startMeasureIdx + musicSheet.Rules.TempoChangeMeasureValidity, musicSheet.SourceMeasures.length - 1);
+                while (endMeasureIdx <= maxEndMeasureIdx) {
+                    const currentMeasure: SourceMeasure = musicSheet.SourceMeasures[endMeasureIdx];
+                    // check if this measure ends a repetition
+                    // or ends a movement (end line given)
+                    // or simply is the last measure:
+                    const endsMovement: boolean = currentMeasure.endingBarStyleEnum === SystemLinesEnum.ThinBold;
+                    if (currentMeasure.endsWithLineRepetition() || endsMovement || endMeasureIdx === musicSheet.SourceMeasures.length - 1) {
+                        break;
+                    }
+                    // check if the measure starts with a repetition
+                    // or with a key change:
+                    // then take the previous measure as end measure:
+                    else
+                    // if (endMeasureIdx > startMeasureIdx && (beginsRepetition || currentMeasure.beginsWithKeyChange(mte.ContinuousTempo.StaffNumber))) {
+                    // TODO what does a key change have to do with tempo?
+                    if (endMeasureIdx > startMeasureIdx && currentMeasure.beginsWithRepetition()) {
+                        endMeasureIdx--;
+                        break;
+                    } else {
+                        endMeasureIdx++;
+                    }
+                }
+                const endMeasure: SourceMeasure = musicSheet.SourceMeasures[endMeasureIdx];
+                // set the end timestamp to slightly before the end of the found end measure:
+                // (slightly before is needed to not include the first note of the next measure)
+                let endTimestamp: Fraction = Fraction.plus(endMeasure.AbsoluteTimestamp, Fraction.minus(endMeasure.Duration, new Fraction(1, 64)));
+                let nextTimestamp: Fraction;
+                if (exp_index < ExpressionsList.length - 1) {
+                    nextTimestamp = ExpressionsList[exp_index + 1].AbsolutePlaybackTimestamp;
+                    if (nextTimestamp.RealValue < endTimestamp.RealValue) {
+                        endTimestamp = nextTimestamp;
+                    }
+                }
+                cte.AbsoluteEndTimestamp = endTimestamp;
+                let Adjustment: number = cte.StartTempo * (1.0 - musicSheet.Rules.TempoContinousFactor) * cte.getTempoFactor();
+                // to have some length influence but not too much:
+                // switched to 4th-root, make adjustment=1.0 after 2 measures, set minimum to 0.6:
+                Adjustment *= (Math.pow(Math.max(0.6, Math.min(cte.AbsoluteTimeSpan, 2.0) / 2.0), 1.0 / 4.0));
+                cte.EndTempo = cte.StartTempo + Adjustment;
+            }
+        }
+        musicSheet.TimestampSortedTempoExpressionsList = ExpressionsList;
+        if (ExpressionsList[0]?.AbsolutePlaybackTimestamp.RealValue === 0 &&
+            (ExpressionsList[0].InstantaneousTempo || ExpressionsList[0].PlaybackTempoInBpm > 0)) {
+            musicSheet.DefaultStartTempoInBpm = primoTempo;
+        }
+    }
+    /** Whether the expression changes the tempo in force for a while, so that "a tempo" returns to the tempo before it:
+     *  a continuous tempo (e.g. poco riten.) or a relative instantaneous one (e.g. rit., poco rit., piu lento).
+     */
+    private static isTemporaryChange(mte: MultiTempoExpression): boolean {
+        if (mte.InstantaneousTempo) {
+            return mte.InstantaneousTempo.isTemporaryChange();
+        }
+        return mte.ContinuousTempo !== undefined;
+    }
+    /** Clean the start of the  expressions list and return the TempoPrimo BPM (in quarter notes per minute).
+     *
+     * Use the initial setting until the first playback instruction, or resolve an instruction at time zero.
+     * Return that BPM for TempoPrimo; a later instruction must not become the starting tempo.
+     */
+    private static cleanExpListStartingEntry(ms: MusicSheet, ExpList: MultiTempoExpression[]): number {
+        // if there is no mte given at the start of the piece:
+        if (ExpList.length === 0 || ExpList[0].AbsolutePlaybackTimestamp.RealValue !== 0) {
+            return ms.DefaultStartTempoInBpm || ms.userStartTempoInBPM;
+        }
+        let soundTempo: number = ExpList[0].PlaybackTempoInBpm;
+        for (let i: number = 1; i < ExpList.length && ExpList[i].AbsolutePlaybackTimestamp.RealValue === 0; i++) {
+            if (ExpList[i].PlaybackTempoInBpm > 0) {
+                soundTempo = ExpList[i].PlaybackTempoInBpm;
+            }
+        }
+        if (ExpList[0].EntriesList.length === 0) {
+            // a sound tempo without a printed tempo: use it without generating a tempo mark
+            return soundTempo;
+        }
+        if (!ExpList[0].InstantaneousTempo) {
+            const I: InstantaneousTempoExpression = new InstantaneousTempoExpression("*generated", PlacementEnum.Above, 1, 0, ExpList[0], true);
+            ExpList[0].addExpression(I, "");
+        }
+        const Inst0: InstantaneousTempoExpression = ExpList[0].InstantaneousTempo;
+        if (!(Inst0.TempoInBpm > 0)) {
+            // Missing BPM can be 0, or undefined for a generated expression or an unknown tempo word.
+            if (soundTempo > 0) {
+                Inst0.TempoInBpm = soundTempo;
+            } else if (ms.DefaultStartTempoInBpm > 0) {
+                Inst0.TempoInBpm = ms.DefaultStartTempoInBpm;
+            } else {
+                Inst0.TempoInBpm = InstantaneousTempoExpression.getDefaultValueForInstTempo(InstTempo.moderato);
+            }
+        }
+        return soundTempo > 0 ? soundTempo : Inst0.TempoInQuarterNotesPerMinute;
+    }
+}
+export class TempoSorter {
+    // constructor() {
+        // super();
+        // TypeInfo.SetPrototypeOf(this, TempoSorter.prototype);
+    // }
+    /** Sort for processing
+     *
+     * \details Sort by AbsoluteTimeStamp, followed by metronomeMark, Inst, atempo, tempoprimo, Cont
+     */
+    public static Compare(x: MultiTempoExpression, y: MultiTempoExpression): number {
+        let ret: number = 0;
+        ret = TempoSorter.CompareNumber(x.AbsolutePlaybackTimestamp.RealValue, y.AbsolutePlaybackTimestamp.RealValue);
+        if (ret !== 0) {
+            return ret;
+        }
+        const sortPriorityX: number = TempoSorter.calcSortPriority(x);
+        const sortPriorityY: number = TempoSorter.calcSortPriority(y);
+        ret = TempoSorter.CompareNumber(sortPriorityX, sortPriorityY);
+        return ret;
+    }
+    public static calcSortPriority(z: MultiTempoExpression): number {
+        if (z.InstantaneousTempo != null) {
+            switch (z.InstantaneousTempo.TempoType) {
+                case TempoType.metronomeMark:
+                    {
+                        return 1;
+                    }
+                case TempoType.inst:
+                    {
+                        return 2;
+                    }
+                case TempoType.change:
+                    {
+                        switch (z.InstantaneousTempo.ChangeSubType) {
+                            case ChangeSubType.atempo:
+                            case ChangeSubType.doppioMovimento:
+                                {
+                                    return 3;
+                                }
+                            case ChangeSubType.tempoprimo:
+                                {
+                                    return 4;
+                                }
+                            default:
+                                break;
+                        }
+                        break;
+                    }
+                default: {
+                    break;
+                }
+            }
+            return 5;
+        } else {
+            return 9;
+        }
+    }
+    public static CompareNumber(a: number, b: number): number {
+        if (a < b) {
+            return -1;
+        } else if (a === b) {
+            return 0;
+        } else {
+            return 1;
+        }
+    }
+}

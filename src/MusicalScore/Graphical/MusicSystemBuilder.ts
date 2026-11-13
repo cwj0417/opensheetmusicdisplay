@@ -5,13 +5,14 @@ import {RhythmInstruction} from "../VoiceData/Instructions/RhythmInstruction";
 import {KeyInstruction} from "../VoiceData/Instructions/KeyInstruction";
 import {ClefInstruction} from "../VoiceData/Instructions/ClefInstruction";
 import {SourceMeasure} from "../VoiceData/SourceMeasure";
-import {MusicSystem} from "./MusicSystem";
+import {MusicSystem, SystemLabelsEnum} from "./MusicSystem";
 import {BoundingBox} from "./BoundingBox";
 import {Staff} from "../VoiceData/Staff";
 import {Instrument} from "../Instrument";
 import {PointF2D} from "../../Common/DataObjects/PointF2D";
 import {StaffLine} from "./StaffLine";
 import {GraphicalLine} from "./GraphicalLine";
+import {GraphicalLabel} from "./GraphicalLabel";
 import {SourceStaffEntry} from "../VoiceData/SourceStaffEntry";
 import {AbstractNotationInstruction} from "../VoiceData/Instructions/AbstractNotationInstruction";
 import {SystemLinesEnum} from "./SystemLinesEnum";
@@ -59,9 +60,19 @@ export class MusicSystemBuilder {
         let prevMeasureEndsPart: boolean = false;
         this.measureListIndex = 0;
         this.currentSystemParams = new SystemBuildParameters();
+        // Each measure gets the staffline of this layout when it's added to a system (see addStaveMeasuresToSystem()). The ones
+        //   after the last system laid out (MaxSystemToDrawNumber) aren't in one, also when a layout before had them in one.
+        for (const measures of this.measureList) {
+            for (const measure of measures ?? []) {
+                if (measure) {
+                    measure.ParentStaffLine = undefined;
+                }
+            }
+        }
 
         // the first System - create also its Labels
         this.currentSystemParams.currentSystem = this.initMusicSystem();
+        this.currentSystemParams.maxLabelLength = this.currentSystemParams.currentSystem.MaxLabelLength;
 
         // let numberOfMeasures: number = 0;
         // for (let idx: number = 0, len: number = this.measureList.length; idx < len; ++idx) {
@@ -83,7 +94,8 @@ export class MusicSystemBuilder {
                 graphicalMeasures[idx].resetLayout();
             }
             const sourceMeasure: SourceMeasure = graphicalMeasures[0].parentSourceMeasure;
-            const sourceMeasureEndsPart: boolean = sourceMeasure.HasEndLine;
+            // a multiple rest measure ends a part where its last measure does, with a final barline
+            const sourceMeasureEndsPart: boolean = this.getLastMeasureOfMultiRest(sourceMeasure).HasEndLine;
             const sourceMeasureBreaksSystem: boolean = sourceMeasureEndsPart && this.rules.NewPartAndSystemAfterFinalBarline;
             const isSystemStartMeasure: boolean = this.currentSystemParams.IsSystemStartMeasure();
             sourceMeasure.IsSystemStartMeasure = isSystemStartMeasure;
@@ -130,15 +142,27 @@ export class MusicSystemBuilder {
                 }
             }
             let totalMeasureWidth: number = currentMeasureBeginInstructionsWidth + currentMeasureEndInstructionsWidth + currentMeasureVarWidth;
-            if (graphicalMeasures[0]?.parentSourceMeasure?.multipleRestMeasures) {
-                totalMeasureWidth = this.rules.MultipleRestMeasureDefaultWidth; // default 4 (12 seems too large)
+            if (this.rules.RenderMultipleRestMeasures && graphicalMeasures[0]?.parentSourceMeasure?.multipleRestMeasures) {
+                currentMeasureVarWidth = this.rules.MultipleRestMeasureDefaultWidth;
+                totalMeasureWidth = currentMeasureBeginInstructionsWidth + currentMeasureEndInstructionsWidth + currentMeasureVarWidth;
+                // Set minimumStaffEntriesWidth so stretchMusicSystem uses a correct value (not -1 from constructor)
+                for (let i: number = 0; i < this.numberOfVisibleStaffLines; i++) {
+                    if (graphicalMeasures[i]) {
+                        graphicalMeasures[i].minimumStaffEntriesWidth = currentMeasureVarWidth;
+                    }
+                }
             }
-            const measureFitsInSystem: boolean = this.currentSystemParams.currentWidth + totalMeasureWidth + nextMeasureBeginInstructionWidth < systemMaxWidth;
+            const currentMeasureNumberInSystem: number = this.currentSystemParams.systemMeasures.length;
+            const labelWidth: number = this.currentSystemParams.maxLabelLength > 0
+                ? this.currentSystemParams.maxLabelLength + this.rules.SystemLabelsRightMargin : 0;
+            const measureFitsInSystem: boolean =
+                this.currentSystemParams.currentWidth + totalMeasureWidth + nextMeasureBeginInstructionWidth + labelWidth < systemMaxWidth;
             const doXmlPageBreak: boolean = this.rules.NewPageAtXMLNewPageAttribute && sourceMeasure.printNewPageXml;
             const impliedSystemBreak: boolean = doXmlPageBreak || // also create new system if doing page break
                 (this.rules.NewSystemAtXMLNewPageAttribute && sourceMeasure.printNewPageXml);
             const doXmlLineBreak: boolean = impliedSystemBreak ||
-                (this.rules.NewSystemAtXMLNewSystemAttribute && sourceMeasure.printNewSystemXml);
+                (this.rules.NewSystemAtXMLNewSystemAttribute && sourceMeasure.printNewSystemXml) ||
+                currentMeasureNumberInSystem === this.rules.RenderXMeasuresPerLineAkaSystem && currentMeasureNumberInSystem > 0;
             if (isSystemStartMeasure || (measureFitsInSystem && !doXmlLineBreak)) {
                 this.addMeasureToSystem(
                     graphicalMeasures, measureStartLine, measureEndLine, totalMeasureWidth,
@@ -211,7 +235,8 @@ export class MusicSystemBuilder {
 
     /**
      * When the actual source measure doesn't fit any more, this method finalizes the current system and
-     * opens up a new empty system, where the actual measure will be added in the next iteration.
+     * opens up a new empty system, where the actual measure will be added in the next iteration
+     * (if a measure is left, see hasMeasuresLeft()).
      * @param measures
      * @param isPartEndingSystem
      */
@@ -222,9 +247,25 @@ export class MusicSystemBuilder {
         this.finalizeCurrentSystem(measures, systemEndsPart, checkExtraInstructionMeasure, startNewPage);
         this.currentSystemParams = new SystemBuildParameters(); // this and the following used to be in finalizeCurrentSystem after stretchMusicSystem
         if (measures !== undefined &&
-            this.measureListIndex < this.measureList.length) {
+            this.hasMeasuresLeft()) {
             this.currentSystemParams.currentSystem = this.initMusicSystem();
+            this.currentSystemParams.maxLabelLength = this.currentSystemParams.currentSystem.MaxLabelLength;
         }
+    }
+
+    /**
+     * Whether the measureList has a measure left to add to a system, at the measureListIndex or after it.
+     * The later measures of a multiple rest measure have no graphical measures there (see getLastMeasureOfMultiRest()),
+     * so none is left after a multiple rest measure that ends the measureList (the piece, or e.g. a batch of renderNext()),
+     * though the measureListIndex is within the measureList.
+     */
+    protected hasMeasuresLeft(): boolean {
+        for (let index: number = this.measureListIndex; index < this.measureList.length; index++) {
+            if (this.measureList[index]?.[0]) {
+                return true;
+            }
+        }
+        return false;
     }
 
     protected finalizeCurrentSystem(measures: GraphicalMeasure[],
@@ -269,6 +310,10 @@ export class MusicSystemBuilder {
         graphicalMeasures: GraphicalMeasure[], measureStartLine: SystemLinesEnum, measureEndLine: SystemLinesEnum,
         totalMeasureWidth: number, currentMeasureBeginInstructionsWidth: number, currentVarWidth: number, currentMeasureEndInstructionsWidth: number
     ): void {
+        if (this.currentSystemParams.systemMeasures.length === 0) {
+            // before the system's first measure, so that the room the labels give up can take more measures
+            this.fitLabelsToMeasures(currentMeasureBeginInstructionsWidth + currentMeasureEndInstructionsWidth, currentVarWidth);
+        }
         this.currentSystemParams.systemMeasures.push({beginLine: measureStartLine, endLine: measureEndLine});
         this.setMeasureWidth(
             graphicalMeasures, totalMeasureWidth, currentMeasureBeginInstructionsWidth, currentMeasureEndInstructionsWidth
@@ -278,6 +323,48 @@ export class MusicSystemBuilder {
         this.currentSystemParams.currentSystemFixWidth += currentMeasureBeginInstructionsWidth + currentMeasureEndInstructionsWidth;
         this.currentSystemParams.currentSystemVarWidth += currentVarWidth;
         this.currentSystemParams.systemMeasureIndex++;
+    }
+
+    /**
+     * Replaces the current system's labels when they leave its measures too little room (EngravingRules.FitPartLabelsToMeasures),
+     * e.g. in a narrow container, where the part names pushed the first measure past the staff end: the first system then
+     * shows the part names on two lines, else the part abbreviations, else no labels, and later systems no abbreviations.
+     * Labels leave too little room when the notes get less than their minimum width and less than 3/4 of the room they would
+     * have without labels. So labels may take up to a quarter of the room of a measure wider than the system anyway,
+     * e.g. a dense measure alone in a system.
+     * @param fixWidth the width of the measures that isn't stretched: clefs, key and time signatures, barlines
+     * @param varWidth the minimum width of the measures' notes, which is stretched to fill the system
+     */
+    protected fitLabelsToMeasures(fixWidth: number, varWidth: number): void {
+        const system: MusicSystem = this.currentSystemParams.currentSystem;
+        if (!this.rules.FitPartLabelsToMeasures || system.MaxLabelLength === 0 || varWidth <= 0 ||
+            this.labelsLeaveMeasuresRoom(fixWidth, varWidth)) {
+            return;
+        }
+        const isFirstSystem: boolean = this.musicSystems.length === 1;
+        const labelsTypes: SystemLabelsEnum[] = isFirstSystem
+            ? [SystemLabelsEnum.NamesOnTwoLines, SystemLabelsEnum.Abbreviations, SystemLabelsEnum.None]
+            : [SystemLabelsEnum.None];
+        for (const labelsType of labelsTypes) {
+            system.createMusicSystemLabel(this.rules.InstrumentLabelTextHeight, this.rules.SystemLabelsRightMargin,
+                                          this.rules.LabelMarginBorderFactor, isFirstSystem, labelsType);
+            if (system.MaxLabelLength > 0 && this.labelsLeaveMeasuresRoom(fixWidth, varWidth)) {
+                break;
+            }
+        }
+        this.currentSystemParams.maxLabelLength = system.MaxLabelLength;
+    }
+
+    /**
+     * Whether the current system's labels leave its measures enough room (see fitLabelsToMeasures()): the notes get at least
+     * their minimum width, or at least 3/4 of the room they would have without labels.
+     * @param fixWidth the width of the measures that isn't stretched
+     * @param varWidth the minimum width of the measures' notes
+     */
+    private labelsLeaveMeasuresRoom(fixWidth: number, varWidth: number): boolean {
+        const notesRoom: number = this.currentSystemParams.currentSystem.StaffLines[0].PositionAndShape.Size.width - fixWidth;
+        const notesRoomWithoutLabels: number = this.getFullPageSystemWidth() - fixWidth;
+        return notesRoom >= Math.min(varWidth, 0.75 * notesRoomWithoutLabels);
     }
 
     /**
@@ -316,11 +403,14 @@ export class MusicSystemBuilder {
         const instruments: Instrument[] = this.graphicalMusicSheet.ParentMusicSheet.Instruments;
         for (let idx: number = 0, len: number = instruments.length; idx < len; ++idx) {
             const instrument: Instrument = instruments[idx];
-            if (!instrument.Visible || instrument.Voices.length === 0) {
+            if (!instrument.isVisible() || instrument.Voices.length === 0) {
                 continue;
             }
             for (let idx2: number = 0, len2: number = instrument.Staves.length; idx2 < len2; ++idx2) {
                 const staff: Staff = instrument.Staves[idx2];
+                if (!staff?.Visible) {
+                    continue;
+                }
                 staffList.push(staff);
             }
         }
@@ -391,6 +481,7 @@ export class MusicSystemBuilder {
 
     /**
      * Initialize the active Instructions from the first [[SourceMeasure]] of first [[SourceMusicPart]].
+     * Also tracks instruction changes through measures before the first visible measure (for drawFromMeasureNumber).
      * @param measureList
      */
     protected initializeActiveInstructions(measureList: GraphicalMeasure[]): void {
@@ -413,6 +504,58 @@ export class MusicSystemBuilder {
                     firstSourceMeasure.FirstInstructionsStaffEntries[staffIndex].Instructions[2];
                 // if (firstRhythmInstruction) {
                 this.activeRhythm[i] = firstRhythmInstruction;
+            }
+
+            // Track instruction changes through measures before the first visible measure (for drawFromMeasureNumber).
+            // This ensures clef/key/rhythm changes in non-rendered measures are properly accounted for.
+            const sourceMeasures: SourceMeasure[] = this.graphicalMusicSheet.ParentMusicSheet.SourceMeasures;
+            for (let measureIdx: number = 0; measureIdx < this.rules.MinMeasureToDrawIndex; measureIdx++) {
+                const sourceMeasure: SourceMeasure = sourceMeasures[measureIdx];
+                if (!sourceMeasure) {
+                    continue;
+                }
+                for (let visStaffIdx: number = 0, len: number = this.visibleStaffIndices.length; visStaffIdx < len; visStaffIdx++) {
+                    const staffIndex: number = this.visibleStaffIndices[visStaffIdx];
+                    // Check FirstInstructionsStaffEntries for clef/key/rhythm changes
+                    const firstEntry: SourceStaffEntry = sourceMeasure.FirstInstructionsStaffEntries[staffIndex];
+                    if (firstEntry) {
+                        for (let idx: number = 0, len2: number = firstEntry.Instructions.length; idx < len2; ++idx) {
+                            const instruction: AbstractNotationInstruction = firstEntry.Instructions[idx];
+                            if (instruction instanceof ClefInstruction) {
+                                this.activeClefs[visStaffIdx] = <ClefInstruction>instruction;
+                            } else if (instruction instanceof KeyInstruction) {
+                                this.activeKeys[visStaffIdx] = <KeyInstruction>instruction;
+                            } else if (instruction instanceof RhythmInstruction) {
+                                this.activeRhythm[visStaffIdx] = <RhythmInstruction>instruction;
+                            }
+                        }
+                    }
+                    // Check staff entries within the measure for mid-measure clef changes
+                    const entries: SourceStaffEntry[] = sourceMeasure.getEntriesPerStaff(staffIndex);
+                    for (let idx: number = 0, len2: number = entries.length; idx < len2; ++idx) {
+                        const staffEntry: SourceStaffEntry = entries[idx];
+                        if (staffEntry.Instructions) {
+                            for (let idx2: number = 0, len3: number = staffEntry.Instructions.length; idx2 < len3; ++idx2) {
+                                const instruction: AbstractNotationInstruction = staffEntry.Instructions[idx2];
+                                if (instruction instanceof ClefInstruction) {
+                                    this.activeClefs[visStaffIdx] = <ClefInstruction>instruction;
+                                } else if (instruction instanceof KeyInstruction) {
+                                    this.activeKeys[visStaffIdx] = instruction;
+                                }
+                            }
+                        }
+                    }
+                    // Check LastInstructionsStaffEntries for end-of-measure clef changes
+                    const lastEntry: SourceStaffEntry = sourceMeasure.LastInstructionsStaffEntries[staffIndex];
+                    if (lastEntry) {
+                        for (let idx: number = 0, len2: number = lastEntry.Instructions.length; idx < len2; ++idx) {
+                            const instruction: AbstractNotationInstruction = lastEntry.Instructions[idx];
+                            if (instruction instanceof ClefInstruction) {
+                                this.activeClefs[visStaffIdx] = <ClefInstruction>instruction;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -483,11 +626,26 @@ export class MusicSystemBuilder {
         for (let idx: number = 0; idx < measureCount; idx++) {
             const measure: GraphicalMeasure = measures[idx];
             const staffIndex: number = this.visibleStaffIndices[idx];
-            const endInstructionsStaffEntry: SourceStaffEntry = sourceMeasure.LastInstructionsStaffEntries[staffIndex];
+            const endInstructionsStaffEntry: SourceStaffEntry = this.getEndInstructionsStaffEntry(sourceMeasure, staffIndex);
             const endInstructionLengthX: number = this.addInstructionsAtMeasureEnd(endInstructionsStaffEntry, measure, measures);
             totalEndInstructionLengthX = Math.max(totalEndInstructionLengthX, endInstructionLengthX);
         }
         return totalEndInstructionLengthX;
+    }
+
+    /**
+     * Returns the instructions drawn at the end of the measure in the staff (a clef change for the next measure), if any.
+     * A multiple rest measure has those of the last of its measures that has some, usually the clef change after it.
+     */
+    protected getEndInstructionsStaffEntry(sourceMeasure: SourceMeasure, staffIndex: number): SourceStaffEntry {
+        const sourceMeasures: SourceMeasure[] = this.graphicalMusicSheet.ParentMusicSheet.SourceMeasures;
+        for (let index: number = this.getLastMeasureOfMultiRest(sourceMeasure).measureListIndex; index > sourceMeasure.measureListIndex; index--) {
+            const endInstructionsStaffEntry: SourceStaffEntry = sourceMeasures[index].LastInstructionsStaffEntries[staffIndex];
+            if (endInstructionsStaffEntry?.Instructions.length > 0) {
+                return endInstructionsStaffEntry;
+            }
+        }
+        return sourceMeasure.LastInstructionsStaffEntries[staffIndex];
     }
 
     protected AddInstructionsAtMeasureBegin(firstEntry: SourceStaffEntry, measure: GraphicalMeasure,
@@ -535,13 +693,16 @@ export class MusicSystemBuilder {
             measure.addKeyAtBegin(currentKey, previousKey, currentClef);
             keyAdded = true;
         }
-        if (currentRhythm !== undefined && currentRhythm.PrintObject && this.rules.RenderTimeSignatures) {
+        if (currentRhythm !== undefined && currentRhythm.PrintObject && this.rules.RenderTimeSignatures &&
+            (!currentRhythm.SynthesizedFromNoTimeSignature || this.rules.RenderTimeSignaturesForSamplesWithoutTimeSignature)) {
             let printRhythm: boolean = true;
             // check for previous pickup measure
             // TODO this does not need to be a pickup measure, see #1069
-            const pickupMeasureIndex: number = measure.MeasureNumber - 1;
+            // (the previous index, not the measure number - 1: that is this measure's own index in a sheet without a pickup measure,
+            //   and the numbers can start again, see VexFlowMusicSheetCalculator.calculateRehearsalMark())
+            const pickupMeasureIndex: number = measure.parentSourceMeasure.measureListIndex - 1;
             const measureIndex: number = pickupMeasureIndex - this.rules.MinMeasureToDrawIndex;
-            if (measure.MeasureNumber - 1 >= 0 && this.measureList[measureIndex]) {
+            if (pickupMeasureIndex >= 0 && this.measureList[measureIndex]) {
                 const previousMeasureList: GraphicalMeasure[] = this.measureList[measureIndex];
                 const previousMeasure: SourceMeasure = previousMeasureList[0]?.parentSourceMeasure;
                 if (previousMeasure?.ImplicitMeasure && previousMeasure?.RhythmPrinted) {
@@ -616,11 +777,13 @@ export class MusicSystemBuilder {
                         const abstractNotationInstruction: AbstractNotationInstruction = staffEntry.Instructions[idx2];
                         if (abstractNotationInstruction instanceof ClefInstruction) {
                             this.activeClefs[visStaffIdx] = <ClefInstruction>abstractNotationInstruction;
+                        } else if (abstractNotationInstruction instanceof KeyInstruction) {
+                            this.activeKeys[visStaffIdx] = abstractNotationInstruction;
                         }
                     }
                 }
             }
-            const lastEntry: SourceStaffEntry = measure.LastInstructionsStaffEntries[staffIndex];
+            const lastEntry: SourceStaffEntry = this.getEndInstructionsStaffEntry(measure, staffIndex);
             if (lastEntry) {
                 const instructions: AbstractNotationInstruction[] = lastEntry.Instructions;
                 for (let idx: number = 0, len3: number = instructions.length; idx < len3; ++idx) {
@@ -634,8 +797,10 @@ export class MusicSystemBuilder {
     }
 
     /**
-     * Check if an extra Instruction [[Measure]] is needed.
-     * @param measures
+     * Check if an extra Instruction [[Measure]] is needed: courtesy key or rhythm instructions at the end of the system for a change
+     * at the start of the next system. If so, every staff of the system gets one, so that all staves end at the same x,
+     * and the courtesy time signatures align.
+     * @param measures the measures that start the next system
      */
     protected checkAndCreateExtraInstructionMeasure(measures: GraphicalMeasure[]): void {
         const firstStaffEntries: SourceStaffEntry[] = measures[0].parentSourceMeasure.FirstInstructionsStaffEntries;
@@ -668,6 +833,24 @@ export class MusicSystemBuilder {
             }
         }
         if (maxMeasureWidth > 0) {
+            // The extra measures form a measure column at the end of the system, so that all its staves end at the same x:
+            //   a staff without a key or rhythm change gets an empty extra measure, and as in a regular measure column
+            //   (see setMeasureWidth()), all of them get the widest begin instructions width, from which stretchMusicSystem() sets their widths.
+            const staffLines: StaffLine[] = this.currentSystemParams.currentSystem.StaffLines;
+            const extraMeasures: GraphicalMeasure[] = [];
+            for (let visStaffIdx: number = 0, len: number = staffLines.length; visStaffIdx < len; ++visStaffIdx) {
+                if (!CollectionUtil.last(staffLines[visStaffIdx].Measures)?.IsExtraGraphicalMeasure) {
+                    this.addExtraInstructionMeasure(visStaffIdx, undefined, undefined);
+                }
+                extraMeasures.push(CollectionUtil.last(staffLines[visStaffIdx].Measures));
+            }
+            const beginInstructionsWidth: number = Math.max(...extraMeasures.map((measure: GraphicalMeasure) => measure.beginInstructionsWidth));
+            for (const measure of extraMeasures) {
+                measure.beginInstructionsWidth = beginInstructionsWidth;
+            }
+            // Their time signatures align, like those of a regular measure column (see addBeginInstructions()), e.g. after keys of different widths.
+            const staves: any[] = extraMeasures.map((measure: GraphicalMeasure) => (measure as any).getVFStave()); // VF.Stave, as VexFlowMeasure
+            staves[0].formatBegModifiers(staves);
             this.currentSystemParams.systemMeasures.push({
                 beginLine: SystemLinesEnum.None,
                 endLine: SystemLinesEnum.None,
@@ -693,6 +876,12 @@ export class MusicSystemBuilder {
         measure.PositionAndShape.BorderBottom = this.rules.StaffHeight;
         const width: number = this.rules.MeasureLeftMargin + measure.beginInstructionsWidth + this.rules.MeasureRightMargin;
         measure.PositionAndShape.BorderRight = width;
+        // Set minimumStaffEntriesWidth so stretchMusicSystem uses a correct value (not -1 from the constructor):
+        // an instruction-only measure has no staff entries, all its width is in beginInstructionsWidth.
+        // With -1, stretchMusicSystem subtracted the system's scaling factor from the width, which made
+        // these measures slightly too narrow in normal systems, and gave them negative widths in strongly
+        // stretched systems (e.g. one measure per system, see test_octaveshift_extragraphicalmeasure).
+        measure.minimumStaffEntriesWidth = 0;
         currentSystem.StaffLines[visStaffIdx].Measures.push(measure);
         return width;
     }
@@ -739,23 +928,21 @@ export class MusicSystemBuilder {
         return SystemLinesEnum.None;
     }
 
-    protected getMeasureEndLine(): SystemLinesEnum {
-        let sourceMeasure: SourceMeasure = undefined;
-        try {
-            sourceMeasure = this.measureList[this.measureListIndex][0].parentSourceMeasure;
-            if (this.rules.RenderMultipleRestMeasures && sourceMeasure.multipleRestMeasures > 1) {
-                const newIndex: number = Math.min(
-                    this.graphicalMusicSheet.ParentMusicSheet.SourceMeasures.length - 1, // safety check
-                    sourceMeasure.measureListIndex + sourceMeasure.multipleRestMeasures - 1
-                    // check the bar line of the last sourcemeasure in the multiple measure rest sequence
-                );
-                sourceMeasure = this.graphicalMusicSheet.ParentMusicSheet.SourceMeasures[newIndex];
-                // sourceMeasure = this.measureList[this.measureListIndex + sourceMeasure.multipleRestMeasures - 1][0].parentSourceMeasure;
-                //    this will be possible when the other GraphicalMeasures in the measureList aren't undefined anymore
-            }
-        } finally {
-            // do nothing
+    /**
+     * Returns the last measure of the multiple rest measure that the given measure begins, which has its barline,
+     * or the given measure if it doesn't begin one.
+     */
+    protected getLastMeasureOfMultiRest(sourceMeasure: SourceMeasure): SourceMeasure {
+        if (!this.rules.RenderMultipleRestMeasures || !(sourceMeasure?.multipleRestMeasures > 1)) {
+            return sourceMeasure;
         }
+        const sourceMeasures: SourceMeasure[] = this.graphicalMusicSheet.ParentMusicSheet.SourceMeasures;
+        // (the other GraphicalMeasures of a multiple rest measure in the measureList are undefined)
+        return sourceMeasures[Math.min(sourceMeasures.length - 1, sourceMeasure.measureListIndex + sourceMeasure.multipleRestMeasures - 1)];
+    }
+
+    protected getMeasureEndLine(): SystemLinesEnum {
+        const sourceMeasure: SourceMeasure = this.getLastMeasureOfMultiRest(this.measureList[this.measureListIndex][0]?.parentSourceMeasure);
 
         if (this.nextMeasureBeginsLineRepetition() && this.thisMeasureEndsLineRepetition()) {
             return SystemLinesEnum.DotsBoldBoldDots;
@@ -769,7 +956,18 @@ export class MusicSystemBuilder {
         /*if (this.measureListIndex === this.measureList.length - 1 || this.measureList[this.measureListIndex][0].parentSourceMeasure.endsPiece) {
             return SystemLinesEnum.ThinBold;
         }*/
-        if (this.nextMeasureHasKeyInstructionChange() || this.thisMeasureEndsWordRepetition() || this.nextMeasureBeginsWordRepetition()) {
+        // a key change gets a double barline, unless the file gives another barline style there that we can draw:
+        //   light-heavy (e.g. at the end of a movement), heavy-heavy, or none (e.g. an invisible barline splitting a measure at the key change).
+        //   Styles we can't draw at a measure end yet (see VexFlowMeasure.addMeasureLine(), e.g. dashed, dotted, heavy) would be drawn
+        //   as a regular barline, which is too inconspicuous before a key change, so they get the double barline too,
+        //   like no barline or a "regular" one in the file (SingleThin).
+        const endingBarStyle: SystemLinesEnum = sourceMeasure?.endingBarStyleEnum;
+        const keepEndingBarStyle: boolean = endingBarStyle === SystemLinesEnum.ThinBold ||
+            endingBarStyle === SystemLinesEnum.DoubleBold ||
+            endingBarStyle === SystemLinesEnum.None;
+        if (this.nextMeasureHasKeyInstructionChange() && !keepEndingBarStyle) {
+        //if (this.nextMeasureHasKeyInstructionChange() || this.thisMeasureEndsWordRepetition() || this.nextMeasureBeginsWordRepetition()) {
+        //  previously, we forced a double thin barline for places like "to coda" end of measure, even if it there's no double thin barline in the xml
             return SystemLinesEnum.DoubleThin;
         }
         if (!sourceMeasure) {
@@ -924,7 +1122,10 @@ export class MusicSystemBuilder {
                 if (!sourceMeasure) {
                     return undefined;
                 }
-                return sourceMeasure.getKeyInstruction(this.visibleStaffIndices[visIndex]);
+                const key: KeyInstruction = sourceMeasure.getKeyInstruction(this.visibleStaffIndices[visIndex]);
+                if (key) {
+                    return key;
+                }
             }
         }
         return undefined;
@@ -951,6 +1152,9 @@ export class MusicSystemBuilder {
      * @param systemEndsPart
      */
     protected stretchMusicSystem(systemEndsPart: boolean): void {
+        // the labels may give way once more, now with all of the system's measures and the instructions added at its end
+        //   (e.g. a courtesy key signature)
+        this.fitLabelsToMeasures(this.currentSystemParams.currentSystemFixWidth, this.currentSystemParams.currentSystemVarWidth);
         let scalingFactor: number = this.calculateXScalingFactor(
             this.currentSystemParams.currentSystemFixWidth, this.currentSystemParams.currentSystemVarWidth
         );
@@ -1097,6 +1301,19 @@ export class MusicSystemBuilder {
                 maxDistance += this.rules.MinSkyBottomDistBetweenStaves;
                 // 3. Take the maximum between previous value and user defined value for staff line minimum distance
                 maxDistance = Math.max(maxDistance, this.rules.StaffHeight + this.rules.MinimumStaffLineDistance);
+                if (this.rules.SnapStafflinesToCrispPixels) {
+                    // Round to whole pixels (0.1 units): all stafflines of the system then share the same
+                    // sub-pixel phase, which calculateMusicSystemsRelativePositions snaps to crisp
+                    // staff line rendering for the whole system.
+                    maxDistance = Math.round(maxDistance * 10) / 10;
+                } else {
+                    // Round to half pixels (0.05 units), the granularity the pixel-based skyline calculation
+                    // produced naturally: this keeps stafflines on consistent sub-pixel y positions, so the
+                    // anti-aliased weight of the (1px) staff lines doesn't vary between systems.
+                    // (The geometric skyline values are exact instead of pixel-quantized, which would otherwise
+                    // propagate arbitrary fractional y positions here. No change for pixel-based values.)
+                    maxDistance = Math.round(maxDistance * 20) / 20;
+                }
                 const lowerStafflineYPos: number = maxDistance + musicSystem.StaffLines[i].PositionAndShape.RelativePosition.y;
                 this.updateStaffLinesRelativePosition(musicSystem, i + 1, lowerStafflineYPos);
             }
@@ -1107,12 +1324,49 @@ export class MusicSystemBuilder {
         musicSystem.PositionAndShape.BorderBottom = lastStaffLine.PositionAndShape.RelativePosition.y + lastStaffLine.PositionAndShape.BorderBottom;
     }
 
+    /** Snaps a system's y position (in units) so that its staff lines render as crisp single pixel
+     *  rows: the lines are 1px wide (at zoom 1), so their centers need to lie at half-pixel positions
+     *  (a line centered between two pixel rows is anti-aliased over both at half opacity instead).
+     *  The stafflines within the system share the same sub-pixel phase
+     *  (see optimizeDistanceBetweenStaffLines), so snapping the system y aligns all of them.
+     *  Shifts the system by at most half a pixel. No-op if EngravingRules.SnapStafflinesToCrispPixels is off. */
+    protected snapSystemYToCrispStaffLines(musicSystem: MusicSystem, systemY: number): number {
+        if (!this.rules.SnapStafflinesToCrispPixels || !musicSystem.StaffLines[0]) {
+            return systemY;
+        }
+        const firstStafflineY: number = systemY + musicSystem.StaffLines[0].PositionAndShape.RelativePosition.y;
+        // line centers at firstStafflineY * 10 (+ whole pixels): snap to the nearest x.5 pixel position
+        const snappedStafflineY: number = (Math.round(firstStafflineY * 10 - 0.5) + 0.5) / 10;
+        return systemY + snappedStafflineY - firstStafflineY;
+    }
+
+    /** The top border of a page's first system (from its skyline), by which all systems of the page are moved down after the
+     *  page layout, see MusicSheetCalculator.calculateMusicSystems(). The page layout includes this move when checking
+     *  whether a system still fits above the bottom margin.
+     *  Rounded to whole pixels to keep the staff line positions snapped by snapSystemYToCrispStaffLines(),
+     *  or to the half-pixel grid if not snapping. */
+    public pageTopBorder(firstSystem: MusicSystem): number {
+        const top: number = firstSystem.PositionAndShape.BorderTop;
+        return this.rules.SnapStafflinesToCrispPixels ? Math.round(top * 10) / 10 : Math.round(top * 20) / 20;
+    }
+
+    /** Room below the last system of page 1, where calculatePageLabels places the copyright. */
+    private copyrightHeightBelowSystems(): number {
+        const copyright: GraphicalLabel = this.graphicalMusicSheet.Copyright;
+        if (!copyright || !this.rules.RenderCopyright || copyright.Label.text.trim() === "") {
+            return 0;
+        }
+        return this.rules.SheetCopyrightMargin + copyright.PositionAndShape.BorderBottom - copyright.PositionAndShape.BorderTop;
+    }
+
     /** Calculates the relative Positions of all MusicSystems.
      *
      */
     protected calculateMusicSystemsRelativePositions(): void {
         let currentPage: GraphicalMusicPage = this.createMusicPage();
         let currentYPosition: number = 0;
+        let pageTopBorder: number = 0;
+        let pageFooterHeight: number = 0;
         // xPosition is always fixed
         let currentSystem: MusicSystem = this.musicSystems[0];
         let timesPageCouldntFitSingleSystem: number = 0;
@@ -1123,6 +1377,8 @@ export class MusicSystemBuilder {
                 // if this is the first system on the current page:
                 // take top margins into account
                 this.addSystemToPage(currentPage, currentSystem);
+                pageTopBorder = this.pageTopBorder(currentSystem);
+                pageFooterHeight = this.graphicalMusicSheet.MusicPages.length === 1 ? this.copyrightHeightBelowSystems() : 0;
                 if (this.rules.CompactMode) {
                     currentYPosition = this.rules.PageTopMarginNarrow;
                 } else {
@@ -1160,6 +1416,18 @@ export class MusicSystemBuilder {
                     currentYPosition += this.rules.TitleTopDistance + this.rules.SheetTitleHeight +
                                             this.rules.TitleBottomDistance;
                     }
+                    const credits: GraphicalLabel[] = this.graphicalMusicSheet.FirstPageCreditWords;
+                    if (credits.length > 0) {
+                        const lastCredit: GraphicalLabel = credits[credits.length - 1];
+                        const creditsBottom: number = lastCredit.PositionAndShape.RelativePosition.y +
+                            lastCredit.PositionAndShape.BorderBottom;
+                        const composer: GraphicalLabel = this.graphicalMusicSheet.Composer;
+                        const lyricist: GraphicalLabel = this.graphicalMusicSheet.Lyricist;
+                        const authorsHeight: number = Math.max(
+                            composer ? composer.PositionAndShape.MarginSize.height + this.rules.SystemComposerDistance : 0,
+                            lyricist ? lyricist.PositionAndShape.MarginSize.height + this.rules.SystemLyricistDistance : 0);
+                        currentYPosition = Math.max(currentYPosition, creditsBottom + authorsHeight + 1);
+                    }
 
                     /*
                     see comment above - only needed for rare case of composer/lyricist being
@@ -1176,11 +1444,13 @@ export class MusicSystemBuilder {
                 //         currentYPosition += -currentSystem.PositionAndShape.BorderTop;
                 //     }
                 // }
+                currentYPosition = this.snapSystemYToCrispStaffLines(currentSystem, currentYPosition);
                 const relativePosition: PointF2D = new PointF2D(this.rules.PageLeftMargin + this.rules.SystemLeftMargin,
                                                                 currentYPosition);
                 currentSystem.PositionAndShape.RelativePosition = relativePosition;
                 // check if the first system doesn't even fit on the page -> would lead to truncation at bottom end:
-                if (currentYPosition + currentSystem.PositionAndShape.BorderBottom > this.rules.PageHeight - this.rules.PageBottomMargin) {
+                if (currentYPosition - pageTopBorder + currentSystem.PositionAndShape.BorderBottom + pageFooterHeight >
+                    this.rules.PageHeight - this.rules.PageBottomMargin) {
                     // can't fit single system on page, maybe PageFormat too small
                     timesPageCouldntFitSingleSystem++;
                     if (timesPageCouldntFitSingleSystem <= 4) { // only warn once with detailed info
@@ -1203,14 +1473,17 @@ export class MusicSystemBuilder {
                 distance += this.rules.MinSkyBottomDistBetweenSystems;
 
                 distance = Math.max(distance, this.rules.MinimumDistanceBetweenSystems + prevSystemLastStaffline.StaffHeight);
-                const newYPosition: number =    currentYPosition +
+                // Round to half pixels for consistent staff line anti-aliasing, see optimizeDistanceBetweenStaffLines:
+                distance = Math.round(distance * 20) / 20;
+                let newYPosition: number =      currentYPosition +
                                                 prevSystemLastStaffLineBB.RelativePosition.y +
                                                 distance;
+                newYPosition = this.snapSystemYToCrispStaffLines(currentSystem, newYPosition);
 
                 // calculate the needed height for placing the current system on the page,
-                // to see if it still fits:
+                // including the later shift down by -pageTopBorder and the copyright below page 1:
                 const currSystemBottomYPos: number =    newYPosition +
-                                                        currentSystem.PositionAndShape.BorderMarginBottom;
+                                                        currentSystem.PositionAndShape.BorderMarginBottom - pageTopBorder + pageFooterHeight;
                 const doXmlPageBreak: boolean = this.rules.NewPageAtXMLNewPageAttribute && previousSystem.breaksPage;
                 if (!doXmlPageBreak &&
                     (currSystemBottomYPos < this.rules.PageHeight - this.rules.PageBottomMargin)) {

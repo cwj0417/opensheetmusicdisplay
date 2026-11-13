@@ -35,9 +35,17 @@ module.exports = {
             "@typescript-eslint/explicit-function-return-type": "off",
             "@typescript-eslint/typedef": "off",
           }
+        },
+        {
+          // the braille module composes braille cells from dot bit patterns (e.g. DOT_1 | DOT_2),
+          //   so bitwise operators are legitimate there (and only there)
+          "files": ["src/Plugins/Braille/**/*.ts", "test/Plugins/Braille/**/*.ts"],
+          "rules": {
+            "no-bitwise": "off"
+          }
         }
     ],
-    "ignorePatterns": ["webpack*.js","karma.conf.js"],
+    "ignorePatterns": ["webpack*.js","karma.conf.js","test/**"],
     "rules": {
         "@typescript-eslint/dot-notation": "error",
         "@typescript-eslint/explicit-function-return-type": "error",

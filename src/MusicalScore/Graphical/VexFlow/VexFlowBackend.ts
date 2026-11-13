@@ -7,6 +7,7 @@ import {PointF2D} from "../../../Common/DataObjects/PointF2D";
 import {BackendType} from "../../../OpenSheetMusicDisplay/OSMDOptions";
 import {GraphicalMusicPage} from "../GraphicalMusicPage";
 import {EngravingRules} from "../EngravingRules";
+import { VexFlowGraphicalNote } from "./VexFlowGraphicalNote";
 
 export class VexFlowBackends {
   public static CANVAS: 0;
@@ -25,7 +26,7 @@ export abstract class VexFlowBackend {
   public width: number; // read-only
   public height: number; // read-only
 
-  public abstract initialize(container: HTMLElement, zoom: number): void;
+  public abstract initialize(container: HTMLElement, zoom: number, id?: string): void;
 
   public getInnerElement(): HTMLElement {
     return this.inner;
@@ -87,11 +88,17 @@ public abstract getContext(): Vex.IRenderContext;
   }
 
   public abstract clear(): void;
+  /** (Try to) free memory. Currently only relevant on iOS. */
+  public abstract free(): void;
 
   public abstract translate(x: number, y: number): void;
+  /**
+   * Renders a text to the screen.
+   * @param language the language of the text as a BCP 47 tag (e.g. "ja"), for the browser's choice of fonts (see Label.language)
+   */
   public abstract renderText(fontHeight: number, fontStyle: FontStyles, font: Fonts, text: string,
                              heightInPixel: number, screenPosition: PointF2D,
-                             color?: string, fontFamily?: string): Node;
+                             color?: string, fontFamily?: string, language?: string): Node;
   /**
    * Renders a rectangle with the given style to the screen.
    * It is given in screen coordinates.
@@ -104,9 +111,9 @@ public abstract getContext(): Vex.IRenderContext;
 
   public abstract renderLine(start: PointF2D, stop: PointF2D, color: string, lineWidth: number, id?: string): Node;
 
-  public abstract renderCurve(points: PointF2D[]): Node;
+  public abstract renderCurve(points: PointF2D[], isSlur?: boolean, startNote?: VexFlowGraphicalNote): Node;
 
-  public abstract renderPath(points: PointF2D[], fill: boolean, id?: string): Node;
+  public abstract renderPath(points: PointF2D[], fill: boolean, id?: string, color?: string): Node;
 
   public abstract getVexflowBackendType(): VF.Renderer.Backends;
 

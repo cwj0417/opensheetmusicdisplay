@@ -4,6 +4,7 @@ import { GraphicalMeasure } from "./GraphicalMeasure";
 import { ContDynamicEnum, ContinuousDynamicExpression } from "../VoiceData/Expressions/ContinuousExpressions/ContinuousDynamicExpression";
 import { PointF2D } from "../../Common/DataObjects/PointF2D";
 import { AbstractGraphicalExpression } from "./AbstractGraphicalExpression";
+import { BoundingBox } from "./BoundingBox";
 import { PlacementEnum } from "../VoiceData/Expressions/AbstractExpression";
 import { SkyBottomLineCalculator } from "./SkyBottomLineCalculator";
 import { ISqueezable } from "./ISqueezable";
@@ -67,8 +68,10 @@ export class GraphicalContinuousDynamicExpression extends AbstractGraphicalExpre
     public updateSkyBottomLine(): void {
         // update Sky-BottomLine
         const skyBottomLineCalculator: SkyBottomLineCalculator = this.parentStaffLine.SkyBottomLineCalculator;
-        const left: number = this.IsVerbal ? this.label.PositionAndShape.RelativePosition.x + this.label.PositionAndShape.BorderMarginLeft : 0;
-        const right: number = this.IsVerbal ? this.label.PositionAndShape.RelativePosition.x + this.label.PositionAndShape.BorderMarginRight : 0;
+        // a verbal dynamic's label is at (0, 0) in this box, see MusicSheetCalculator.calculateGraphicalVerbalContinuousDynamic()
+        const box: BoundingBox = this.PositionAndShape;
+        const left: number = this.IsVerbal ? box.RelativePosition.x + box.BorderMarginLeft : 0;
+        const right: number = this.IsVerbal ? box.RelativePosition.x + box.BorderMarginRight : 0;
         if (!this.IsSoftAccent && !this.IsVerbal && this.lines.length < 2) {
             log.warn("Not enough lines for SkyBottomLine calculation");
         }
@@ -93,8 +96,8 @@ export class GraphicalContinuousDynamicExpression extends AbstractGraphicalExpre
                         skyBottomLineCalculator.updateSkyLineWithWedge(this.lines[0].End, this.lines[0].Start);
                     } // else covered with the log.warn above
                 } else {
-                    const yValue: number = this.label.PositionAndShape.BorderMarginTop + this.label.PositionAndShape.RelativePosition.y;
-                    skyBottomLineCalculator.updateSkyLineInRange(left, right, yValue);
+                    const yValue: number = box.BorderMarginTop + box.RelativePosition.y;
+                    skyBottomLineCalculator.updateSkyLineWithLabel(left, right, yValue);
                 }
                 break;
             case PlacementEnum.Below:
@@ -106,8 +109,8 @@ export class GraphicalContinuousDynamicExpression extends AbstractGraphicalExpre
                         skyBottomLineCalculator.updateBottomLineWithWedge(this.lines[1].End, this.lines[1].Start);
                     } // else covered with the log.warn above
                 } else {
-                    const yValue: number = this.label.PositionAndShape.BorderMarginBottom + this.label.PositionAndShape.RelativePosition.y;
-                    skyBottomLineCalculator.updateBottomLineInRange(left, right, yValue);
+                    const yValue: number = box.BorderMarginBottom + box.RelativePosition.y;
+                    skyBottomLineCalculator.updateBottomLineWithLabel(left, right, yValue);
                 }
                 break;
             default:
@@ -257,6 +260,64 @@ export class GraphicalContinuousDynamicExpression extends AbstractGraphicalExpre
             this.createSecondHalfDiminuendoLines(startX, endX, yPosition);
         } else {
             this.createDiminuendoLines(startX, endX, yPosition);
+        }
+    }
+
+    /** Wrapper for createFirstHalfCrescendoLines and createFirstHalfDiminuendoLines.
+     * Checks whether `this` is crescendo or diminuendo, helps avoid code duplication.
+     */
+    public createFirstHalfLines(startX: number, endX: number, y: number,
+        wedgeOpeningLength: number = this.rules.WedgeOpeningLength,
+        wedgeMeasureEndOpeningLength: number = this.rules.WedgeMeasureEndOpeningLength,
+        wedgeLineWidth: number = this.rules.WedgeLineWidth
+    ): void {
+        if (this.ContinuousDynamic.DynamicType === ContDynamicEnum.crescendo) {
+            this.createFirstHalfCrescendoLines(startX, endX, y,
+                wedgeMeasureEndOpeningLength, wedgeLineWidth);
+        } else if (this.ContinuousDynamic.DynamicType === ContDynamicEnum.diminuendo) {
+            this.createFirstHalfDiminuendoLines(startX, endX, y,
+                wedgeOpeningLength, wedgeMeasureEndOpeningLength, wedgeLineWidth);
+        }
+    }
+
+    /** Wrapper for createSecondHalfCrescendoLines and createSecondHalfDiminuendoLines, see createFirstHalfLines. */
+    public createSecondHalfLines(startX: number, endX: number, y: number,
+        wedgeMeasureBeginOpeningLength: number = this.rules.WedgeMeasureBeginOpeningLength,
+        wedgeOpeningLength: number = this.rules.WedgeOpeningLength,
+        wedgeLineWidth: number = this.rules.WedgeLineWidth
+    ): void {
+        if (this.ContinuousDynamic.DynamicType === ContDynamicEnum.crescendo) {
+            this.createSecondHalfCrescendoLines(startX, endX, y,
+                wedgeMeasureBeginOpeningLength, wedgeOpeningLength, wedgeLineWidth);
+        } else if (this.ContinuousDynamic.DynamicType === ContDynamicEnum.diminuendo) {
+            this.createSecondHalfDiminuendoLines(startX, endX, y,
+                wedgeMeasureBeginOpeningLength, wedgeLineWidth);
+        }
+    }
+
+    /** Wrapper for createSecondHalfCrescendoLines and createFirstHalfDiminuendoLines, see createFirstHalfLines: the lines of a
+     *  part of a wedge that goes on before and after it, e.g. in a system between the wedge's first and last one. A crescendo
+     *  looks like its part in its last system then, not starting at a point, and a diminuendo like its part in its first system,
+     *  not ending at a point, so that the wedge doesn't look finished.
+     */
+    public createInbetweenLines(startX: number, endX: number, y: number): void {
+        if (this.ContinuousDynamic.DynamicType === ContDynamicEnum.crescendo) {
+            this.createSecondHalfCrescendoLines(startX, endX, y);
+        } else if (this.ContinuousDynamic.DynamicType === ContDynamicEnum.diminuendo) {
+            this.createFirstHalfDiminuendoLines(startX, endX, y);
+        }
+    }
+
+    /** Wrapper for createCrescendoLines and createDiminuendoLines, see createFirstHalfLines. */
+    public createLines(startX: number, endX: number, y: number,
+        wedgeOpeningLength: number = this.rules.WedgeOpeningLength, wedgeLineWidth: number = this.rules.WedgeLineWidth
+    ): void {
+        if (this.ContinuousDynamic.DynamicType === ContDynamicEnum.crescendo) {
+            this.createCrescendoLines(startX, endX, y,
+                wedgeOpeningLength, wedgeLineWidth);
+        } else if (this.ContinuousDynamic.DynamicType === ContDynamicEnum.diminuendo) {
+            this.createDiminuendoLines(startX, endX, y,
+                wedgeOpeningLength, wedgeLineWidth);
         }
     }
 

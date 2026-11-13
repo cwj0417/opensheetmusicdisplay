@@ -4,6 +4,7 @@ import { GraphicalOctaveShift } from "../GraphicalOctaveShift";
 import { OctaveShift, OctaveEnum } from "../../VoiceData/Expressions/ContinuousExpressions/OctaveShift";
 import { BoundingBox } from "../BoundingBox";
 import { GraphicalStaffEntry } from "../GraphicalStaffEntry";
+import { GraphicalVoiceEntry } from "../GraphicalVoiceEntry";
 import { VexFlowVoiceEntry } from "./VexFlowVoiceEntry";
 import log from "loglevel";
 
@@ -14,6 +15,8 @@ export class VexFlowOctaveShift extends GraphicalOctaveShift {
 
     /** Defines the note where the octave shift starts */
     public startNote: VF.StemmableNote;
+    /** Source staff, independent of a cross-staff horizontal start anchor. */
+    public startStave: VF.Stave;
     /** Defines the note where the octave shift ends */
     public endNote: VF.StemmableNote;
     /** Top or bottom of the staffline */
@@ -22,6 +25,10 @@ export class VexFlowOctaveShift extends GraphicalOctaveShift {
     private supscript: string;
     /** Main text element */
     private text: string;
+    /** The stave text position the bracket is drawn at, in staff spaces like Vexflow's Stave options top_text_position (above)
+     *  and bottom_text_position (below): set by the calculator from the skyline or bottom line, see getTextBracket().
+     *  Undefined: the start stave's own. */
+    public textPosition: number;
 
     /**
      * Create a new vexflow ocatve shift
@@ -73,15 +80,27 @@ export class VexFlowOctaveShift extends GraphicalOctaveShift {
     }
 
     /**
-     * Set an end note using a staff entry
+     * Set an end note using a staff entry.
      * @param graphicalStaffEntry the staff entry that holds the end note
+     * @param maxVoiceEntryIndex when >= 0, only consider voice entries before this index
+     *        (used when an octave shift stop falls between grace notes sharing the same staff entry)
      */
-    public setEndNote(graphicalStaffEntry: GraphicalStaffEntry): boolean {
-        // this is duplicate code from setStartNote, but if we make one general method, we add a lot of branching.
-        for (const gve of graphicalStaffEntry.graphicalVoiceEntries) {
-            const vve: VexFlowVoiceEntry = (gve as VexFlowVoiceEntry);
+    public setEndNote(graphicalStaffEntry: GraphicalStaffEntry, maxVoiceEntryIndex: number = -1): boolean {
+        const entries: GraphicalVoiceEntry[] = graphicalStaffEntry.graphicalVoiceEntries;
+        const limit: number = maxVoiceEntryIndex >= 0 ? Math.min(maxVoiceEntryIndex, entries.length) : entries.length;
+        // Search backwards to find the last covered VoiceEntry
+        for (let i: number = limit - 1; i >= 0; i--) {
+            const vve: VexFlowVoiceEntry = (entries[i] as VexFlowVoiceEntry);
             if (vve?.vfStaveNote) {
                 this.endNote = vve.vfStaveNote;
+                this.endMeasure = graphicalStaffEntry.parentMeasure;
+                if (this.endMeasure?.parentSourceMeasure.Rules.OctaveShiftOnWholeMeasureNoteUntilEndOfMeasure &&
+                    vve.notes[0].sourceNote.isWholeMeasureNote()) {
+                    // draw whole note octave shift until end of measure
+                    //   Instead, we could try to fix the display of very short octaveshift brackets,
+                    //   which seem to overlap text (-> VF.TextBracket VexFlowPatch?).
+                    this.graphicalEndAtMeasureEnd = true;
+                }
                 return true;
             }
         }
@@ -92,8 +111,17 @@ export class VexFlowOctaveShift extends GraphicalOctaveShift {
      * Get the actual vexflow text bracket used for drawing
      */
     public getTextBracket(): VF.TextBracket {
+        let start: VF.StemmableNote = this.startNote;
+        if (this.startStave && this.startStave !== this.startNote.getStave()) {
+            // TextBracket only reads these two methods from its start anchor.
+            start = {
+                // Another staff's stave may not have been positioned by the drawer yet.
+                getAbsoluteX: (): number => this.startNote.getAbsoluteX() - this.startNote.getStave().getX() + this.startStave.getX(),
+                getStave: (): VF.Stave => this.startStave
+            } as any;
+        }
         let stop: VF.Note = this.endNote;
-        let stopObject: Object;
+        let stopObject: object;
         const self: VexFlowOctaveShift = this;
         if (this.graphicalEndAtMeasureEnd) {
             // draw until end of measure (measure end barline):
@@ -104,7 +132,7 @@ export class VexFlowOctaveShift extends GraphicalOctaveShift {
                 getAbsoluteX(): number {
                     return (self.endMeasure.PositionAndShape.AbsolutePosition.x + self.endMeasure.PositionAndShape.Size.width) * 10;
                 },
-                getGlyph(): Object {
+                getGlyph(): object {
                     return {
                         getWidth(): number {
                             return 0;
@@ -118,7 +146,7 @@ export class VexFlowOctaveShift extends GraphicalOctaveShift {
         }
         const vfBracket: VF.TextBracket = new VF.TextBracket({
             position: this.position,
-            start: this.startNote,
+            start: start,
             stop: stop,
             superscript: this.supscript,
             text: this.text,
@@ -126,6 +154,15 @@ export class VexFlowOctaveShift extends GraphicalOctaveShift {
         if (this.endsOnDifferentStaffLine) {
             // make bracket open-ended (--- instead of ---|) if not ending on current staffline
             (vfBracket as any).render_options.show_bracket = false;
+        }
+        if (this.textPosition !== undefined) {
+            // Vexflow draws the bracket at a line counted from its stave's text position, which also places other marks of that
+            //   stave: e.g. a trill mark, a fermata or a pedal mark, and a trill line. So the bracket isn't moved there by setting
+            //   the stave's text position (which would move those marks into the bracket), but by its line.
+            const staveOptions: any = start.getStave().options;
+            const staveTextPosition: number = this.position === VF.TextBracket.Positions.TOP ?
+                staveOptions.top_text_position : staveOptions.bottom_text_position;
+            vfBracket.setLine((vfBracket as any).line + this.textPosition - staveTextPosition);
         }
         return vfBracket;
     }

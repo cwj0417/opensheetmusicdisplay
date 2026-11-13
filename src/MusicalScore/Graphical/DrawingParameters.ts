@@ -1,21 +1,7 @@
 import { EngravingRules } from "./EngravingRules";
 import { PlacementEnum } from "../VoiceData/Expressions/AbstractExpression";
-
-export enum ColoringModes {
-    XML = 0,
-    AutoColoring = 1,
-    CustomColorSet = 2
-}
-
-export enum DrawingParametersEnum {
-    allon = "allon",
-    compact = "compact",
-    compacttight = "compacttight",
-    default = "default",
-    leadsheet = "leadsheet",
-    preview = "preview",
-    thumbnail = "thumbnail",
-}
+import { DrawingParametersEnum } from "../../Common/Enums/DrawingParametersEnum";
+import { ColoringModes } from "../../Common/Enums/ColoringModes";
 
 /** Internal drawing/rendering parameters and broad modes like compact and thumbnail. Overlap with EngravingRules. */
 export class DrawingParameters {
@@ -40,7 +26,8 @@ export class DrawingParameters {
     public drawPartNames: boolean = true;
     public coloringMode: ColoringModes;
     public fingeringPosition: PlacementEnum = PlacementEnum.Left;
-    /** Draw notes set to be invisible (print-object="no" in XML). */
+    /** Draw notes set to be invisible (print-object="no" in XML). Set it with DrawHiddenNotes, which sets
+     *  EngravingRules.RenderHiddenNotes. */
     public drawHiddenNotes: boolean = false;
 
     constructor(drawingParameters: DrawingParametersEnum = DrawingParametersEnum.default, rules?: EngravingRules) {
@@ -95,28 +82,29 @@ export class DrawingParameters {
         this.DrawComposer = true;
         this.DrawLyricist = true;
         this.drawCredits = true;
+        this.rules.RenderFirstPageCreditWords = true;
         this.DrawPartNames = true;
-        this.drawHiddenNotes = true;
+        this.DrawHiddenNotes = true;
         this.rules.CompactMode = false;
     }
 
     public setForDefault(): void {
         this.rules.loadDefaultValues(); // this is not ideal, but it's hard to reset compactTight mode properly
         this.setForAllOn();
-        this.drawHiddenNotes = false;
+        this.DrawHiddenNotes = false;
     }
 
     public setForThumbnail(): void {
         this.drawHighlights = false;
         this.drawErrors = false;
         this.drawSelectionStartSymbol = false;
-        this.drawSelectionStartSymbol = false;
+        this.drawSelectionEndSymbol = false;
         this.drawCursors = false;
         this.drawActivitySymbols = false;
         this.drawScrollIndicator = false;
         this.drawComments = true;
         this.drawMarkedAreas = true;
-        this.drawHiddenNotes = false;
+        this.DrawHiddenNotes = false;
     }
 
     public setForCompactMode(): void {
@@ -124,7 +112,7 @@ export class DrawingParameters {
         this.rules.CompactMode = true;
         this.DrawCredits = false; // sets DrawComposer, DrawTitle, DrawLyricist to false
         // this.DrawPartNames = true; // unnecessary
-        this.drawHiddenNotes = false;
+        this.DrawHiddenNotes = false;
     }
 
     public setForCompactTightMode(): void {
@@ -171,6 +159,7 @@ export class DrawingParameters {
 
     public set DrawCredits(value: boolean) {
         this.drawCredits = value;
+        this.rules.RenderFirstPageCreditWords = value;
         this.DrawComposer = value;
         this.DrawTitle = value;
         this.DrawSubtitle = value;
@@ -246,6 +235,16 @@ export class DrawingParameters {
         if (!this.rules.RenderPartNames) {
             this.rules.RenderPartAbbreviations = false;
         }
+    }
+
+    public get DrawHiddenNotes(): boolean {
+        return this.drawHiddenNotes;
+    }
+
+    /** Enable or disable drawing hidden notes (print-object="no" in XML), see EngravingRules.RenderHiddenNotes. */
+    public set DrawHiddenNotes(value: boolean) {
+        this.drawHiddenNotes = value;
+        this.rules.RenderHiddenNotes = value;
     }
 
     public get FingeringPosition(): PlacementEnum {

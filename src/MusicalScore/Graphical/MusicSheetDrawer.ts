@@ -51,6 +51,32 @@ export abstract class MusicSheetDrawer {
     public skyLineVisible: boolean = false;
     public bottomLineVisible: boolean = false;
 
+    /** Lazy rendering: when >= 0, drawPage() draws only the systems whose index, counted through the systems of
+     *  all pages, is within [LazyDrawSystemsFromIndex, LazyDrawSystemsToIndexExcl), leaving the
+     *  already-drawn systems above untouched in the shared backends. -1 (default) draws every system.
+     *  Set by OpenSheetMusicDisplay.renderAppend() before each appended batch; reset to -1 after. */
+    public LazyDrawSystemsFromIndex: number = -1;
+    public LazyDrawSystemsToIndexExcl: number = Number.POSITIVE_INFINITY;
+    /** Lazy horizontal rendering (RenderSingleHorizontalStaffline): draw only graphical objects whose right
+     *  edge x (in OSMD units) lies in (LazyDrawFromXUnits, LazyDrawToXUnits] -- the measures and spanning
+     *  elements that first entered the drawn frontier this batch. ±Infinity (default) draws everything.
+     *  Set by drawPage() for each system from LazyDrawSystemWindows; reset after. */
+    public LazyDrawFromXUnits: number = Number.NEGATIVE_INFINITY;
+    public LazyDrawToXUnits: number = Number.POSITIVE_INFINITY;
+    /** Lazy horizontal rendering: when set, drawPage() draws only the systems in this map, each with its own draw
+     *  x-window (see LazyDrawFromXUnits): a batch can reach several systems, e.g. after forced system breaks.
+     *  Set by OpenSheetMusicDisplay.renderAppendGrowingHorizontal() per batch; reset after. */
+    public LazyDrawSystemWindows: Map<MusicSystem, { fromX: number, toX: number }> = undefined;
+    /** Lazy horizontal rendering: when true, drawPage() skips the page-level labels (title/credits) and the
+     *  bounding boxes (see drawableBoundingBoxElement). They are drawn once, on the final batch, when the
+     *  page is drawn to its full width. */
+    public LazySkipPageLabels: boolean = false;
+    /** Lazy horizontal rendering: when true, drawLabel() ignores the x-window gate. Scoped (set/restored) to
+     *  the page-label loop in drawPage(), since those labels span the full page width and must all be drawn
+     *  even though their left edges lie behind the final batch's frontier, and to the labels of a measure's
+     *  staff entries (see VexFlowMusicSheetDrawer.drawMeasure()), which are drawn with their measure. */
+    public LazyForcePageLabels: boolean = false;
+
     protected rules: EngravingRules;
     protected graphicalMusicSheet: GraphicalMusicSheet;
     protected textMeasurer: ITextMeasurer;
@@ -144,7 +170,31 @@ export abstract class MusicSheetDrawer {
         throw new Error("not implemented");
     }
 
+    /** Lazy horizontal rendering: whether an object with this bounding box falls in the current draw
+     *  x-window (its right edge first entered the drawn frontier this batch). True when not lazy-horizontal. */
+    protected lazyDrawsAtX(rightXUnits: number): boolean {
+        if (this.LazyDrawFromXUnits === Number.NEGATIVE_INFINITY && this.LazyDrawToXUnits === Number.POSITIVE_INFINITY) {
+            return true;
+        }
+        return rightXUnits > this.LazyDrawFromXUnits && rightXUnits <= this.LazyDrawToXUnits;
+    }
+    protected lazyDrawsObject(psh: BoundingBox): boolean {
+        return this.lazyDrawsAtX(psh.AbsolutePosition.x + psh.BorderRight);
+    }
+    /** Lazy horizontal rendering: whether to draw the once-only system elements (instrument braces and group
+     *  brackets at the left edge, and the sky and bottom lines of the stafflines, see skyLineVisible). True for
+     *  non-lazy and for a system's first lazy-horizontal batch, which owns its left edge (LazyDrawFromXUnits is
+     *  -Infinity); false for continuation batches, so a system's brace isn't redrawn on top of itself every
+     *  batch. (Vertical lazy keeps the x-window at ±Infinity and draws each system's brace once via the
+     *  per-system gate, so this stays true there.) */
+    protected lazyDrawsLeftEdgeOnce(): boolean {
+        return this.LazyDrawFromXUnits === Number.NEGATIVE_INFINITY;
+    }
+
     public drawLabel(graphicalLabel: GraphicalLabel, layer: number): Node {
+        if (!this.LazyForcePageLabels && !this.lazyDrawsObject(graphicalLabel.PositionAndShape)) {
+            return undefined;
+        }
         if (!this.isVisible(graphicalLabel.PositionAndShape)) {
             return undefined;
         }
@@ -196,7 +246,23 @@ export abstract class MusicSheetDrawer {
                 throw new ArgumentOutOfRangeException("");
         }
 
-        return this.renderLabel(graphicalLabel, layer, bitmapWidth, bitmapHeight, fontHeightInPixel, screenPosition);
+        const node: Node = this.renderLabel(graphicalLabel, layer, bitmapWidth, bitmapHeight, fontHeightInPixel, screenPosition);
+        if (graphicalLabel.SVGClass) {
+            this.addSVGClass(node, graphicalLabel.SVGClass);
+        }
+        return node;
+    }
+
+    /**
+     * Adds a class naming what a drawn element shows (e.g. "osmd-slur") to the SVG group it was drawn into, next to the
+     * class naming its shape (e.g. vf-curve), so that CSS and code can find e.g. all slurs. Labels get theirs from
+     * GraphicalLabel.SVGClass (see drawLabel()); the drawer names slurs (osmd-slur), the lines of wedges (osmd-wedge),
+     * lyric extender lines (osmd-extender) and the strokes of tremolos between notes and buzz rolls (osmd-tremolo).
+     * @param node the group, undefined if nothing was drawn, e.g. with the canvas backend
+     * @param className the class
+     */
+    protected addSVGClass(node: Node, className: string): void {
+        (node as SVGGElement)?.classList?.add(className);
     }
 
     protected applyScreenTransformation(point: PointF2D): PointF2D {
@@ -324,14 +390,15 @@ export abstract class MusicSheetDrawer {
         for (const systemLine of musicSystem.SystemLines) {
             this.drawSystemLineObject(systemLine);
         }
-        if (musicSystem.Parent === musicSystem.Parent.Parent.MusicPages[0]) {
+        if (this.rules.RenderSystemLabelsAfterFirstPage ||
+            musicSystem.Parent === musicSystem.Parent.Parent.MusicPages[0]) {
             for (const label of musicSystem.Labels) {
                 label.SVGNode = this.drawLabel(label, <number>GraphicalLayers.Notes);
             }
         }
 
         const instruments: Instrument[] = this.graphicalMusicSheet.ParentMusicSheet.Instruments;
-        const instrumentsVisible: number = instruments.filter((instrument) => instrument.Visible).length;
+        const instrumentsVisible: number = instruments.filter((instrument) => instrument.isVisible()).length;
         for (const bracket of musicSystem.InstrumentBrackets) {
             this.drawInstrumentBrace(bracket, musicSystem);
         }
@@ -379,39 +446,51 @@ export abstract class MusicSheetDrawer {
     protected drawStaffLine(staffLine: StaffLine): void {
         for (const measure of staffLine.Measures) {
             this.drawMeasure(measure);
-        }
-
-        if (this.rules.RenderLyrics) {
-            if (staffLine.LyricsDashes.length > 0) {
-                this.drawDashes(staffLine.LyricsDashes);
+            if (measure.parentSourceMeasure) {
+                measure.parentSourceMeasure.WasRendered = true; // simplification
+                // parentSourceMeasure can be undefined for implicit measure (e.g. time signature change at end of staffline)
             }
         }
+
+        // the lyric dashes are drawn with the lyric lines (extends) after the staff line, in drawMusicSystem()
         this.drawOctaveShifts(staffLine);
 
         this.drawPedals(staffLine);
 
+        this.drawWavyLines(staffLine);
+
         this.drawExpressions(staffLine);
 
-        if (this.skyLineVisible) {
+        // (lazy horizontal: the staffline's whole lines, once, by the first batch reaching it)
+        if (this.skyLineVisible && this.lazyDrawsLeftEdgeOnce()) {
             this.drawSkyLine(staffLine);
         }
 
-        if (this.bottomLineVisible) {
+        if (this.bottomLineVisible && this.lazyDrawsLeftEdgeOnce()) {
             this.drawBottomLine(staffLine);
         }
     }
 
+    /**
+     * Draws the lyric lines (extenders, e.g. "dich___") of a staff line.
+     * They are positioned relative to the staff line (see MusicSheetCalculator.calculateLyricExtend()),
+     * because the staff lines are spaced vertically only after the lyrics are positioned.
+     * They are drawn at their absolute position without changing them, so that drawing the laid-out sheet again
+     * (e.g. in an incremental render) draws them at the same position.
+     * @param lyricLines the lyric lines of the staff line
+     * @param staffLine the staff line the lyric lines are positioned relative to
+     */
     protected drawLyricLines(lyricLines: GraphicalLine[], staffLine: StaffLine): void {
-        staffLine.LyricLines.forEach(lyricLine => {
-            // TODO maybe we should put this in the calculation (MusicSheetCalculator.calculateLyricExtend)
-            // then we can also remove staffLine argument
-            // but same addition doesn't work in calculateLyricExtend, because y-spacing happens after lyrics positioning
-            lyricLine.Start.y += staffLine.PositionAndShape.AbsolutePosition.y;
-            lyricLine.End.y += staffLine.PositionAndShape.AbsolutePosition.y;
-            lyricLine.Start.x += staffLine.PositionAndShape.AbsolutePosition.x;
-            lyricLine.End.x += staffLine.PositionAndShape.AbsolutePosition.x;
-            this.drawGraphicalLine(lyricLine, this.rules.LyricUnderscoreLineWidth, lyricLine.colorHex);
-        });
+        const staffLinePosition: PointF2D = staffLine.PositionAndShape.AbsolutePosition;
+        for (const lyricLine of lyricLines) {
+            const start: PointF2D = new PointF2D(lyricLine.Start.x + staffLinePosition.x, lyricLine.Start.y + staffLinePosition.y);
+            const end: PointF2D = new PointF2D(lyricLine.End.x + staffLinePosition.x, lyricLine.End.y + staffLinePosition.y);
+            if (!this.lazyDrawsAtX(Math.max(start.x, end.x))) {
+                continue; // lazy horizontal: drawn once, with the batch that draws its end (like the lyric dashes)
+            }
+            const node: Node = this.drawGraphicalLine(new GraphicalLine(start, end, lyricLine.Width), this.rules.LyricUnderscoreLineWidth, lyricLine.colorHex);
+            this.addSVGClass(node, "osmd-extender");
+        }
     }
 
     protected drawExpressions(staffline: StaffLine): void {
@@ -438,7 +517,9 @@ export abstract class MusicSheetDrawer {
      * @param layer Number of the layer that the lyrics should be drawn in
      */
     protected drawDashes(lyricsDashes: GraphicalLabel[]): void {
-        lyricsDashes.forEach(dash => dash.SVGNode = this.drawLabel(dash, <number>GraphicalLayers.Notes));
+        lyricsDashes.forEach(dash => {
+            dash.SVGNode = this.drawLabel(dash, <number>GraphicalLayers.Notes);
+        });
     }
 
     // protected drawSlur(slur: GraphicalSlur, abs: PointF2D): void {
@@ -450,6 +531,8 @@ export abstract class MusicSheetDrawer {
     }
 
     protected abstract drawPedals(staffLine: StaffLine): void;
+
+    protected abstract drawWavyLines(staffLine: StaffLine): void;
 
     protected drawStaffLines(staffLine: StaffLine): void {
         if (staffLine.StaffLines) {
@@ -503,21 +586,107 @@ export abstract class MusicSheetDrawer {
             return;
         }
 
-        for (const system of page.MusicSystems) {
+        const lazySelective: boolean = this.LazyDrawSystemsFromIndex >= 0;
+        // Lazy: the index of the page's first system, counted through the systems of all pages
+        const firstSystemIndex: number = lazySelective ? this.systemCountBefore(page) : 0;
+        for (let sysIdx: number = 0; sysIdx < page.MusicSystems.length; sysIdx++) {
+            // Lazy: skip systems already drawn in a previous batch (below FromIndex) and the
+            // deferred last system of this batch (at/above ToIndexExcl), so each system is drawn once,
+            // in its final stable position. See OpenSheetMusicDisplay.renderAppend().
+            if (!this.lazyDrawsSystem(firstSystemIndex + sysIdx)) {
+                continue;
+            }
+            const system: MusicSystem = page.MusicSystems[sysIdx];
+            // Lazy horizontal: only the systems the batch reaches, each in its own x-window.
+            if (this.LazyDrawSystemWindows) {
+                const xWindow: { fromX: number, toX: number } = this.LazyDrawSystemWindows.get(system);
+                if (!xWindow) {
+                    continue;
+                }
+                this.LazyDrawFromXUnits = xWindow.fromX;
+                this.LazyDrawToXUnits = xWindow.toX;
+            }
             if (this.isVisible(system.PositionAndShape)) {
                 this.drawMusicSystem(system);
             }
         }
-        if (page === page.Parent.MusicPages[0]) {
+        if (this.LazyDrawSystemWindows) {
+            this.LazyDrawFromXUnits = Number.NEGATIVE_INFINITY;
+            this.LazyDrawToXUnits = Number.POSITIVE_INFINITY;
+        }
+        // Page labels: the title block (title, subtitle, composer, lyricist) sits above the first system, the
+        // copyright below the last one of the page. A lazy (incremental) render draws each with the batch that draws the
+        // system it is anchored to: the title block with the batch drawing the first system (the first batch, or a
+        // reconciliation batch redrawing everything) -- a continuation batch (FromIndex > 0) must not redraw it on
+        // top of the already-drawn block -- and the copyright only with the batch drawing the page's last system, the
+        // final one (or the one completing the page before a page break). Every earlier batch holds its last system back,
+        // and the copyright's anchor, the last system of the still-growing layout, moves down with each appended batch:
+        // a copyright drawn earlier would be left behind in the middle of the score, since the drawn text isn't moved
+        // along (and couldn't be on a Canvas) (#1710).
+        if (page === page.Parent.MusicPages[0] && !this.LazySkipPageLabels) {
+            const drawsFirstSystem: boolean = this.lazyDrawsSystem(firstSystemIndex);
+            const drawsLastSystem: boolean = this.lazyDrawsSystem(firstSystemIndex + page.MusicSystems.length - 1);
+            // Page labels span the full page width and are drawn once, in full. Under lazy-horizontal this is
+            // the final batch; open the x-window so labels left of its frontier aren't dropped. No-op otherwise.
+            const savedForcePageLabels: boolean = this.LazyForcePageLabels;
+            this.LazyForcePageLabels = true;
             for (const label of page.Labels) {
+                const drawsAnchorSystem: boolean = label.AnchoredToPageBottom ? drawsLastSystem : drawsFirstSystem;
+                if (!drawsAnchorSystem) {
+                    continue; // drawn by another batch (or already drawn by an earlier one)
+                }
                 label.SVGNode = this.drawLabel(label, <number>GraphicalLayers.Notes);
             }
+            this.LazyForcePageLabels = savedForcePageLabels;
         }
         // Draw bounding boxes for debug purposes. This has to be at the end because only
-        // then all the calculations and recalculations are done
-        if (this.drawableBoundingBoxElement) {
+        // then all the calculations and recalculations are done. A lazy (incremental) render draws them, for all pages,
+        // with the batch drawing the sheet's last system, the final one: they would be drawn again by every batch,
+        // also those of the systems that aren't drawn yet, which can still move.
+        if (this.drawableBoundingBoxElement && !this.LazySkipPageLabels && (!lazySelective || this.lazyDrawsSystem(this.lastSystemIndex(page)))) {
             this.drawBoundingBoxes(page.PositionAndShape, 0, this.drawableBoundingBoxElement);
         }
+    }
+
+    /**
+     * Lazy rendering: whether drawPage() draws the system with the given index (see LazyDrawSystemsFromIndex).
+     * @param systemIndex the index of the system, counted through the systems of all pages
+     * @returns true if the system is in the draw range of the batch, or if the render isn't lazy
+     */
+    protected lazyDrawsSystem(systemIndex: number): boolean {
+        if (this.LazyDrawSystemsFromIndex < 0) {
+            return true;
+        }
+        return systemIndex >= this.LazyDrawSystemsFromIndex && systemIndex < this.LazyDrawSystemsToIndexExcl;
+    }
+
+    /**
+     * Lazy rendering: the index of the page's first system, counted through the systems of all pages: the number of systems
+     * on the pages before it.
+     * @param page the page
+     * @returns the number of systems before the page
+     */
+    private systemCountBefore(page: GraphicalMusicPage): number {
+        let count: number = 0;
+        for (const previousPage of page.Parent.MusicPages) {
+            if (previousPage === page) {
+                break;
+            }
+            count += previousPage.MusicSystems.length;
+        }
+        return count;
+    }
+
+    /**
+     * Lazy rendering: the index of the sheet's last drawn system (on the last page drawn, see EngravingRules.MaxPageToDrawNumber),
+     * counted through the systems of all pages.
+     * @param page a page of the sheet
+     * @returns the index of the last system
+     */
+    private lastSystemIndex(page: GraphicalMusicPage): number {
+        const pages: GraphicalMusicPage[] = page.Parent.MusicPages;
+        const lastPage: GraphicalMusicPage = pages[Math.min(pages.length, this.rules.MaxPageToDrawNumber) - 1];
+        return this.systemCountBefore(lastPage) + lastPage.MusicSystems.length - 1;
     }
 
     /**
@@ -526,7 +695,7 @@ export abstract class MusicSheetDrawer {
      * @param layer Layer to draw to
      * @param type Type of element to show bounding boxes for as string.
      */
-    private drawBoundingBoxes(startBox: BoundingBox, layer: number = 0, type: string = "all"): void {
+    private drawBoundingBoxes(startBox: BoundingBox, layer: number = 0, type: string = "all", drawClassName: boolean = false): void {
         const dataObjectString: string = (startBox.DataObject.constructor as any).name; // only works with non-minified build or sourcemap
         let typeMatch: boolean = false;
         if (type === "all") {
@@ -558,7 +727,11 @@ export abstract class MusicSheetDrawer {
             // }
         }
         if (typeMatch || dataObjectString === type) {
-            this.drawBoundingBox(startBox, undefined, true, dataObjectString, layer);
+            let labelText: string = undefined;
+            if (drawClassName) {
+                labelText = dataObjectString;
+            }
+            this.drawBoundingBox(startBox, undefined, true, labelText, layer);
         }
         layer++;
         startBox.ChildElements.forEach(bb => this.drawBoundingBoxes(bb, layer, type));
@@ -593,7 +766,9 @@ export abstract class MusicSheetDrawer {
         const rectNode: Node = this.renderRectangle(tmpRect, <number>GraphicalLayers.Background, layer, color, 0.5);
         if (labelText) {
             const label: Label = new Label(labelText);
-            this.renderLabel(new GraphicalLabel(label, 0.8, TextAlignmentEnum.CenterCenter, this.rules),
+            const gLabel: GraphicalLabel = new GraphicalLabel(label, 0.8, TextAlignmentEnum.CenterCenter, this.rules);
+            gLabel.setLabelPositionAndShapeBorders(); // this is necessary for it to render (gLabel.TextLines to be set).
+            this.renderLabel(gLabel,
                 layer, tmpRect.width, tmpRect.height, tmpRect.height, new PointF2D(tmpRect.x, tmpRect.y + 12));
             // theoretically we should return the nodes from renderLabel here as well, so they can also be removed later
         }

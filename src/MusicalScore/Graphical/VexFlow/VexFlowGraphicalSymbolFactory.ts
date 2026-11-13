@@ -30,6 +30,9 @@ import { VexFlowTabMeasure } from "./VexFlowTabMeasure";
 import { VexFlowStaffLine } from "./VexFlowStaffLine";
 import { KeyInstruction } from "../../VoiceData/Instructions/KeyInstruction";
 import { VexFlowMultiRestMeasure } from "./VexFlowMultiRestMeasure";
+import { BoundingBox } from "../BoundingBox";
+import { PlacementEnum } from "../../VoiceData/Expressions/AbstractExpression";
+import { VexFlowKeySignatureNote } from "./VexFlowKeySignatureNote";
 
 export class VexFlowGraphicalSymbolFactory implements IGraphicalSymbolFactory {
     /**
@@ -176,6 +179,26 @@ export class VexFlowGraphicalSymbolFactory implements IGraphicalSymbolFactory {
         return;
     }
 
+    public createInStaffKey(graphicalStaffEntry: GraphicalStaffEntry, key: KeyInstruction,
+                            previousKey: KeyInstruction, clef: ClefInstruction): void {
+        const measure: GraphicalMeasure = graphicalStaffEntry.parentMeasure;
+        const rules: EngravingRules = measure.parentSourceMeasure.Rules;
+        if (!rules.RenderKeySignatures || !measure.ShowKeySignature ||
+            (measure.isTabMeasure && !rules.TabKeySignatureRendered && !rules.TabKeySignatureSpacingAdded)) {
+            return;
+        }
+        const signature: VexFlowKeySignatureNote = new VexFlowKeySignatureNote(
+            VexFlowConverter.keySignature(key), VexFlowConverter.keySignature(previousKey), VexFlowConverter.Clef(clef).type);
+        const color: string = rules.DefaultColorMusic || "#000000";
+        (signature as any).setStyle({fillStyle: color, strokeStyle: color});
+        if (measure.isTabMeasure && !rules.TabKeySignatureRendered) {
+            // Match addKeyAtBegin: reserve width but hide SVG output as well as Canvas ink.
+            (signature as any).setStyle({fillStyle: "#00000000", strokeStyle: "#00000000"});
+            (signature.keySignature as any).hidden = true;
+        }
+        (graphicalStaffEntry as VexFlowStaffEntry).vfKeys.push(signature);
+    }
+
     /**
      * Adds a chord symbol at the given staff entry
      * @param sourceStaffEntry
@@ -186,20 +209,39 @@ export class VexFlowGraphicalSymbolFactory implements IGraphicalSymbolFactory {
                                 graphicalStaffEntry: GraphicalStaffEntry,
                                 keyInstruction: KeyInstruction,
                                 transposeHalftones: number): void {
-        const rules: EngravingRules = graphicalStaffEntry.parentMeasure.parentSourceMeasure.Rules;
+        const rules: EngravingRules = graphicalStaffEntry.parentMeasure.parentSourceMeasure.Rules; // TODO undefined sometimes
         let xShift: number = 0;
         const chordSymbolSpacing: number = rules.ChordSymbolXSpacing;
         for (const chordSymbolContainer of sourceStaffEntry.ChordContainers) {
+            if (!chordSymbolContainer) { // undefined
+                continue;
+            }
+            let parentBbox: BoundingBox = graphicalStaffEntry.PositionAndShape;
+            if (graphicalStaffEntry.graphicalVoiceEntries.length === 1 &&
+                graphicalStaffEntry.graphicalVoiceEntries[0].notes.length === 1 &&
+                graphicalStaffEntry.graphicalVoiceEntries[0].notes[0].sourceNote.isWholeRest()) {
+                // graphicalStaffEntry.graphicalVoiceEntries[0]?.notes[0]?.sourceNote.IsWholeMeasureRest // not yet set apparently
+                // whole measure rests: position at start of measure instead of middle like the rest note
+                // xShift -= graphicalStaffEntry.PositionAndShape.RelativePosition.x; // unfortunately relative x is 0 here
+                parentBbox = graphicalStaffEntry.parentMeasure.PositionAndShape;
+                xShift += graphicalStaffEntry.parentMeasure.beginInstructionsWidth;
+                xShift += rules.ChordSymbolWholeMeasureRestXOffset; // margin to start of measure / bar
+            }
             const graphicalChordSymbolContainer: GraphicalChordSymbolContainer =
               new GraphicalChordSymbolContainer(chordSymbolContainer,
-                                                graphicalStaffEntry.PositionAndShape,
+                                                parentBbox,
                                                 rules.ChordSymbolTextHeight,
                                                 keyInstruction,
                                                 transposeHalftones,
-                                                graphicalStaffEntry.parentMeasure.parentSourceMeasure.Rules // TODO undefined sometimes
+                                                rules
                                                 );
+            const placement: PlacementEnum = graphicalChordSymbolContainer.GetChordSymbolContainer.Placement;
             const graphicalLabel: GraphicalLabel = graphicalChordSymbolContainer.GraphicalLabel;
-            graphicalLabel.PositionAndShape.RelativePosition.y -= rules.ChordSymbolYOffset;
+            if (placement === PlacementEnum.Below) {
+                graphicalLabel.PositionAndShape.RelativePosition.y = rules.StaffHeight + rules.ChordSymbolYOffset;
+            } else {
+                graphicalLabel.PositionAndShape.RelativePosition.y -= rules.ChordSymbolYOffset;
+            }
             graphicalLabel.setLabelPositionAndShapeBorders(); // to get Size.width
             let extraXShiftForShortChordSymbols: number = 0;
             if (graphicalLabel.PositionAndShape.Size.width < rules.ChordSymbolExtraXShiftWidthThreshold) {

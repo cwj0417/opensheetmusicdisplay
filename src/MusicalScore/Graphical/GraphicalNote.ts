@@ -63,7 +63,7 @@ export class GraphicalNote extends GraphicalObject {
     }
 
     public get ParentMusicPage(): GraphicalMusicPage {
-      return this.parentVoiceEntry.parentStaffEntry.parentMeasure.ParentMusicSystem.Parent;
+      return this.parentVoiceEntry.parentStaffEntry.parentMeasure.ParentMusicSystem?.Parent;
     }
 
     /** Get a GraphicalNote from a Note. Use osmd.rules as the second parameter (instance reference).
@@ -71,4 +71,88 @@ export class GraphicalNote extends GraphicalObject {
     public static FromNote(note: Note, rules: EngravingRules): GraphicalNote {
       return rules.NoteToGraphicalNoteMap.getValue(note.NoteToGraphicalNoteObjectId);
     }
+
+    public ToStringShort(octaveOffset: number = 0): string {
+      return this.sourceNote?.ToStringShort(octaveOffset);
+    }
+    public get ToStringShortGet(): string {
+      return this.ToStringShort(0);
+    }
+
+    public getLyricsSVGs(): HTMLElement[] {
+      const lyricsEntries: HTMLElement[] = [];
+      if (!this.parentVoiceEntry) {
+        return lyricsEntries;
+      }
+      for (const lyricsEntry of this.parentVoiceEntry.parentStaffEntry.LyricsEntries) {
+        lyricsEntries.push(lyricsEntry.GraphicalLabel?.SVGNode as HTMLElement);
+      }
+      return lyricsEntries;
+    }
+
+    /** Change the color of a note (without re-rendering). See ColoringOptions for options like applyToBeams etc.
+     * This requires the SVG backend (default, instead of canvas backend).
+     */
+    public setColor(color: string, coloringOptions: ColoringOptions): void {
+      // implemented in VexFlowGraphicalNote
+    }
+
+    /** Toggle visibility of the note, making it and its stem and beams invisible for `false`.
+     * By default, this will also hide the note's slurs, ties and glissandi, e.g. slides (see visibilityOptions).
+     * (This only works with the default SVG backend, not with the Canvas backend/renderer)
+     * To get a GraphicalNote from a Note, use osmd.EngravingRules.GNote(note).
+     * To check whether a note is visible, e.g. after setVisible(false), use isVisible().
+     */
+    public setVisible(visible: boolean, visibilityOptions: VisibilityOptions = {}): void {
+      // implemented in VexFlowGraphicalNote
+    }
+
+    /** Whether the note is visible: false after setVisible(false), which hides its notehead (unless
+     * VisibilityOptions.applyToNotehead is false), and for a note hidden in the score, e.g. by print-object="no", or of a hidden
+     * voice (Voice.Visible false), see Note.isVisible().
+     * Like setVisible(), this works on the drawn SVG: a new render draws the notes hidden with setVisible() visible again.
+     * It's true for a note that isn't drawn at all, e.g. of a hidden instrument (Instrument.Visible false).
+     */
+    public isVisible(): boolean {
+      return this.sourceNote.isVisible(); // whether setVisible() hid the drawn note: see VexFlowGraphicalNote
+    }
+}
+
+/** Coloring options for VexFlowGraphicalNote.setColor().
+ * Slurs, ties and glissandi belong to the note they start at: coloring only the note they end at doesn't color them.
+ */
+export interface ColoringOptions {
+  applyToBeams?: boolean;
+  applyToFlag?: boolean;
+  /** Glissandi and slides: their lines, and in a TAB staff their label "sl." too. */
+  applyToGlissandi?: boolean;
+  applyToLedgerLines?: boolean;
+  applyToLyrics?: boolean;
+  applyToModifiers?: boolean;
+  applyToMultiRestMeasure?: boolean;
+  /** Whether to apply the color to the number indicating how many measures the rest lasts (not the measure number). */
+  applyToMultiRestMeasureNumber?: boolean;
+  /** Whether to apply the color to the wide bar within the stafflines (looks about like `|----|`). */
+  applyToMultiRestMeasureRestBar?: boolean;
+  applyToNoteheads?: boolean;
+  applyToSlurs?: boolean;
+  applyToStem?: boolean;
+  applyToTies?: boolean;
+}
+
+/** Visibility options for VexFlowGraphicalNote.setVisible().
+ * E.g. if setVisible(false, {applyToTies: false}), everything about a note will be invisible except its ties.
+ * Slurs, ties and glissandi belong to the note they start at: hiding only the note they end at keeps them visible.
+ * */
+export interface VisibilityOptions {
+  applyToBeams?: boolean;
+  /** Glissandi and slides: their lines, and in a TAB staff their label "sl." too. */
+  applyToGlissandi?: boolean;
+  applyToLedgerLines?: boolean;
+  /** The note's SVG group (VexFlowGraphicalNote.getSVGGElement()): its noteheads, flag and modifiers like accidentals and dots,
+   *  and the stem of a note without a beam, unless applyToStem is false. */
+  applyToNotehead?: boolean;
+  applyToSlurs?: boolean;
+  applyToStem?: boolean;
+  applyToTies?: boolean;
 }

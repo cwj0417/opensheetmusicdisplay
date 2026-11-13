@@ -26,19 +26,10 @@ module.exports = {
                 loader: 'ts-loader',
                 // loader: 'awesome-typescript-loader',
                 exclude: /(node_modules|bower_components)/
-            },
-            {
-                test: /\.glsl$/,
-                type: "asset/source",
-                exclude: /(node_modules|bower_components)/
             }
         ]
     },
     plugins: [
-        new webpack.ProvidePlugin({
-            $: 'jquery',
-            jQuery: 'jquery'
-        }),
         new webpack.EnvironmentPlugin({
             STATIC_FILES_SUBFOLDER: false, // Set to other directory if NOT using webpack-dev-server
             DEBUG: false,
